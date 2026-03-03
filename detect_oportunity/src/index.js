@@ -310,6 +310,13 @@ async function restoreOpenTrades() {
     }
 
     console.log("♻️ Restored OPEN trades:", openTrades.size);
+    if (openTrades.size > 0 && !lockedLevelKey) {
+        const any = openTrades.values().next().value;
+        if (any?.pivot_base_day_used && any?.level) {
+            lockedLevelKey = levelKey(any.pivot_base_day_used, any.level);
+            console.log("🔒 Locked level restored:", lockedLevelKey);
+        }
+    }
 }
 
 function checkOpenTrades({ bid, ask }) {
