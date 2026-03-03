@@ -27,6 +27,7 @@ const COOLDOWN_MS = Number(process.env.COOLDOWN_MS ?? (2 * 60_000));
 // trade rules
 const TP_PCT = Number(process.env.TP_PCT ?? 0.0015); // 0.15%
 const SL_PCT = Number(process.env.SL_PCT ?? 0.0015); // 0.15% (mismo)
+const QTY_BTC = Number(process.env.QTY_BTC ?? 0.0001);
 
 // tracker
 const MAX_OPEN_TRADES = Number(process.env.MAX_OPEN_TRADES ?? 1); // 1 para no abrir múltiples a la vez
@@ -114,6 +115,8 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
 
     // ✅ entry real
     const entryPrice = side === "LONG" ? ask : bid;
+    const qty = QTY_BTC;
+    const notional_in = qty * entryPrice;
 
     // ✅ TP/SL en USDT desde entry
     const tpDelta = entryPrice * TP_PCT;
@@ -149,6 +152,8 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
             sl_pct: SL_PCT,
             tp_delta: tpDelta,
             sl_delta: slDelta,
+            qty_btc: qty,
+            notional_in,
         },
     };
 
@@ -172,6 +177,9 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
         tpPrice,
         slPrice,
         entryTs,
+        qty,                       // ✅ necesario
+        meta: row.meta,            // ✅ guarda meta de entrada para merge
+        closing: false,            // ✅ evita dobles cierres
     });
 
     console.log("🟢 OPEN TRADE", {
@@ -182,6 +190,8 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
         tpPrice,
         slPrice,
         pivot_base_day: pivots.baseDay,
+        qty_btc: qty,
+        notional_in: Number(notional_in.toFixed(4)),
     });
 
     return data.id;
@@ -197,19 +207,28 @@ async function closeTrade({ tradeId, bid, ask, reason }) {
 
     const exitTs = new Date().toISOString();
 
-    // ✅ PnL simple por unidad (sin qty)
     const pnl = t.side === "LONG"
-        ? (exitPrice - t.entryPrice)
-        : (t.entryPrice - exitPrice);
+        ? (exitPrice - t.entryPrice) * t.qty
+        : (t.entryPrice - exitPrice) * t.qty;
+
+    const notional_out = t.qty * exitPrice;
 
     const patch = {
         status: "CLOSED",
         exit_ts: exitTs,
         exit_price: exitPrice,
-        exit_reason: reason, // TP o SL
+        exit_reason: reason,
         exit_bid: bid,
         exit_ask: ask,
         pnl_usdt: pnl,
+        meta: {
+            ...(t.meta || {}),
+            notional_out,
+            pnl_usdt: pnl,
+            exit_reason: reason,
+            exit_price: exitPrice,
+            exit_ts: exitTs,
+        },
     };
 
     const { error } = await supabase
@@ -219,6 +238,7 @@ async function closeTrade({ tradeId, bid, ask, reason }) {
 
     if (error) {
         console.error("❌ Error actualizando cierre:", error.message);
+        t.closing = false; // ✅ reintentar en el próximo tick
         return;
     }
 
@@ -230,8 +250,40 @@ async function closeTrade({ tradeId, bid, ask, reason }) {
         side: t.side,
         entry: t.entryPrice,
         exit: exitPrice,
-        pnl_usdt: Number(pnl.toFixed(2)),
+        pnl_usdt: Number(pnl.toFixed(6)),
     });
+}
+
+async function restoreOpenTrades() {
+    const { data, error } = await supabase
+        .from(TRADES_TABLE)
+        .select("id, side, level, entry_price, tp_price, sl_price, entry_ts, meta")
+        .eq("symbol", SYMBOL_DB)
+        .eq("status", "OPEN")
+        .order("entry_ts", { ascending: false })
+        .limit(MAX_OPEN_TRADES);
+
+    if (error) {
+        console.error("❌ Error restaurando OPEN trades:", error.message);
+        return;
+    }
+
+    for (const t of data || []) {
+        openTrades.set(t.id, {
+            id: t.id,
+            side: t.side,
+            level: t.level,
+            entryPrice: Number(t.entry_price),
+            tpPrice: Number(t.tp_price),
+            slPrice: Number(t.sl_price),
+            entryTs: t.entry_ts,
+            qty: Number(t.meta?.qty_btc ?? QTY_BTC),
+            meta: t.meta || {},
+            closing: false,
+        });
+    }
+
+    console.log("♻️ Restored OPEN trades:", openTrades.size);
 }
 
 function checkOpenTrades({ bid, ask }) {
@@ -240,15 +292,19 @@ function checkOpenTrades({ bid, ask }) {
     // SHORT: TP cuando ASK <= tpPrice; SL cuando ASK >= slPrice
     for (const [id, t] of openTrades.entries()) {
         if (t.side === "LONG") {
-            if (bid >= t.tpPrice) {
+            if (!t.closing && bid >= t.tpPrice) {
+                t.closing = true;
                 closeTrade({ tradeId: id, bid, ask, reason: "TP" });
-            } else if (bid <= t.slPrice) {
+            } else if (!t.closing && bid <= t.slPrice) {
+                t.closing = true;
                 closeTrade({ tradeId: id, bid, ask, reason: "SL" });
             }
         } else {
-            if (ask <= t.tpPrice) {
+            if (!t.closing && ask <= t.tpPrice) {
+                t.closing = true;
                 closeTrade({ tradeId: id, bid, ask, reason: "TP" });
-            } else if (ask >= t.slPrice) {
+            } else if (!t.closing && ask >= t.slPrice) {
+                t.closing = true;
                 closeTrade({ tradeId: id, bid, ask, reason: "SL" });
             }
         }
@@ -401,5 +457,6 @@ function startWS() {
 // Boot
 // ======================
 await refreshPivots();
+await restoreOpenTrades();
 setInterval(refreshPivots, 10 * 60_000);
 startWS();
