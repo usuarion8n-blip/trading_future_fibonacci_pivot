@@ -2,6 +2,9 @@
  * CandlestickChart — Lightweight Charts candlestick chart
  * Manages its own candle map in a ref to avoid re-render overhead.
  * Draws Fibonacci pivot/resistance/support lines from Supabase.
+ * Two sets of levels:
+ *   - Yesterday     → dashed, bright colors
+ *   - Day before    → dotted, dim colors, suffixed "-2"
  */
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts'
@@ -16,15 +19,26 @@ const TIMEFRAMES = [
 
 const MAX_CANDLES = 500
 
-// Price line definitions: label, color, key in levels object
+// Yesterday's lines — dashed, bright
 const PIVOT_LINES = [
-    { key: 'r3', label: 'R3', color: '#ff1744', lineWidth: 1 },
-    { key: 'r2', label: 'R2', color: '#ff4d6a', lineWidth: 1 },
-    { key: 'r1', label: 'R1', color: '#ff8fa3', lineWidth: 1 },
-    { key: 'pivot', label: 'P', color: '#f7931a', lineWidth: 2 },
-    { key: 's1', label: 'S1', color: '#69d9b0', lineWidth: 1 },
-    { key: 's2', label: 'S2', color: '#00c896', lineWidth: 1 },
-    { key: 's3', label: 'S3', color: '#00916e', lineWidth: 1 },
+    { key: 'r3', label: 'R3', color: '#ff1744', lineWidth: 1, lineStyle: LineStyle.Dashed },
+    { key: 'r2', label: 'R2', color: '#ff4d6a', lineWidth: 1, lineStyle: LineStyle.Dashed },
+    { key: 'r1', label: 'R1', color: '#ff8fa3', lineWidth: 1, lineStyle: LineStyle.Dashed },
+    { key: 'pivot', label: 'P', color: '#f7931a', lineWidth: 2, lineStyle: LineStyle.Dashed },
+    { key: 's1', label: 'S1', color: '#69d9b0', lineWidth: 1, lineStyle: LineStyle.Dashed },
+    { key: 's2', label: 'S2', color: '#00c896', lineWidth: 1, lineStyle: LineStyle.Dashed },
+    { key: 's3', label: 'S3', color: '#00916e', lineWidth: 1, lineStyle: LineStyle.Dashed },
+]
+
+// Day-before-yesterday lines — dotted, dim (lower opacity via hex alpha)
+const PREV_PIVOT_LINES = [
+    { key: 'r3', label: 'R3-2', color: '#ff174466', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 'r2', label: 'R2-2', color: '#ff4d6a66', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 'r1', label: 'R1-2', color: '#ff8fa366', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 'pivot', label: 'P-2', color: '#f7931a66', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 's1', label: 'S1-2', color: '#69d9b066', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 's2', label: 'S2-2', color: '#00c89666', lineWidth: 1, lineStyle: LineStyle.Dotted },
+    { key: 's3', label: 'S3-2', color: '#00916e66', lineWidth: 1, lineStyle: LineStyle.Dotted },
 ]
 
 export default function CandlestickChart({ priceObj }) {
@@ -32,10 +46,11 @@ export default function CandlestickChart({ priceObj }) {
     const chartRef = useRef(null)
     const seriesRef = useRef(null)
     const candleMapRef = useRef(new Map())
-    const priceLinesRef = useRef([])       // track active price lines
+    const priceLinesRef = useRef([])       // yesterday price lines
+    const prevPriceLinesRef = useRef([])   // day-before price lines
     const [activeTf, setActiveTf] = useState(60)
 
-    const { levels, loading: pivotLoading, error: pivotError } = useFibPivot()
+    const { levels, prevLevels, loading: pivotLoading, error: pivotError } = useFibPivot()
 
     // Store activeTf in a ref so the onmessage closure uses the latest value
     const tfRef = useRef(activeTf)
@@ -96,33 +111,45 @@ export default function CandlestickChart({ priceObj }) {
         }
     }, []) // run once
 
-    // Draw / update pivot lines whenever levels data changes
-    useEffect(() => {
+    // Helper to draw a set of price lines
+    function drawLines(levelData, lineDefinitions, linesRef) {
         const series = seriesRef.current
-        if (!series || !levels) return
+        if (!series) return
 
-        // Remove existing price lines
-        priceLinesRef.current.forEach(line => {
+        // Remove existing
+        linesRef.current.forEach(line => {
             try { series.removePriceLine(line) } catch (_) { }
         })
-        priceLinesRef.current = []
+        linesRef.current = []
 
-        // Add new price lines
-        PIVOT_LINES.forEach(({ key, label, color, lineWidth }) => {
-            const price = levels[key]
+        if (!levelData) return
+
+        // Add new
+        lineDefinitions.forEach(({ key, label, color, lineWidth, lineStyle }) => {
+            const price = levelData[key]
             if (price == null || isNaN(price)) return
 
             const line = series.createPriceLine({
                 price,
                 color,
                 lineWidth,
-                lineStyle: LineStyle.Dashed,
+                lineStyle,
                 axisLabelVisible: true,
                 title: label,
             })
-            priceLinesRef.current.push(line)
+            linesRef.current.push(line)
         })
+    }
+
+    // Draw / update yesterday's pivot lines
+    useEffect(() => {
+        drawLines(levels, PIVOT_LINES, priceLinesRef)
     }, [levels])
+
+    // Draw / update day-before-yesterday's pivot lines
+    useEffect(() => {
+        drawLines(prevLevels, PREV_PIVOT_LINES, prevPriceLinesRef)
+    }, [prevLevels])
 
     // Update candle when a new price tick arrives
     useEffect(() => {
@@ -180,6 +207,11 @@ export default function CandlestickChart({ priceObj }) {
                     {levels && !pivotLoading && (
                         <span className="pivot-badge ok">
                             🔶 P: {levels.pivot?.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                        </span>
+                    )}
+                    {prevLevels && !pivotLoading && (
+                        <span className="pivot-badge ok" style={{ opacity: 0.6 }}>
+                            🔸 P-2: {prevLevels.pivot?.toLocaleString('en-US', { maximumFractionDigits: 2 })}
                         </span>
                     )}
                 </div>
