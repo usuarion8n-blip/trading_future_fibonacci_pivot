@@ -21,7 +21,7 @@ Binance Futures REST API
 │  listening_service  │ ─────────────────▶│   Supabase   │
 │  (calcula pivots)   │                   │  (Postgres)  │
 └─────────────────────┘                   └──────┬───────┘
-                                                 │  lee pivots
+                                                 │  lee pivots (2 días)
 Binance Futures WebSocket (bookTicker)           │
         │                                        ▼
         ▼                              ┌──────────────────────┐
@@ -43,7 +43,7 @@ Binance Futures WebSocket (bookTicker)           │
 
 ### 1. `listening_service` — Cálculo de Pivots Fibonacci
 
-Obtiene las últimas 6 velas diarias completas de **Binance Futures REST API** y calcula los niveles de pivot Fibonacci diarios para el símbolo configurado. Guarda los resultados en la tabla `fib_pivot_daily` de Supabase mediante upsert.
+Obtiene las últimas velas diarias completas de **Binance Futures REST API** y calcula los niveles de pivot Fibonacci diarios para el símbolo configurado. Guarda los resultados en la tabla `fib_pivot_daily` de Supabase mediante upsert.
 
 **Fórmulas utilizadas:**
 | Nivel | Fórmula |
@@ -67,17 +67,33 @@ npm run dev
 
 ### 2. `detect_oportunity` — Detector de Oportunidades en Tiempo Real
 
-Se conecta al stream `bookTicker` de **Binance Futures WebSocket** y monitorea el precio en tiempo real contra los niveles de pivot cargados desde Supabase. Cuando el precio toca un nivel y rebota, registra una operación simulada en la tabla `sim_trades`.
+Se conecta al stream `bookTicker` de **Binance Futures WebSocket** y monitorea el precio en tiempo real contra **los niveles de pivot de los 2 últimos días** cargados desde Supabase. Cuando el precio toca un nivel y rebota, registra una operación en la tabla `sim_trades`.
 
-**Lógica de detección:**
-1. El precio se acerca a un nivel (dentro de `TOUCH_BUFFER_BPS` puntos básicos) → se marca como *toque*
-2. El precio rebota `REBOUND_BPS` puntos básicos en la dirección correcta
-3. Se confirma el rebote durante `CONFIRM_TICKS` ticks consecutivos → **se abre la operación**
-4. La operación se cierra automáticamente al alcanzar el `TP_USDT` o `SL_USDT`
+#### Lógica de detección
+
+1. Al arrancar, carga los **2 registros más recientes** de `fib_pivot_daily` (`loadRecentPivots(2)`) y restaura los trades `OPEN` de sesiones anteriores (`restoreOpenTrades`).
+2. En cada tick, evalúa `S1`, `S2`, `R1`, `R2` para **ambos días** simultáneamente.
+3. Cada nivel se identifica unívocamente con la clave `${baseDay}:${level}` para evitar colisiones entre días.
+4. **Flujo de señal:**
+   - El precio se acerca a un nivel (dentro de `TOUCH_BUFFER_BPS` bps) → marcado como *toque*
+   - El precio rebota `REBOUND_BPS` bps en la dirección esperada
+   - Se confirma el rebote durante `CONFIRM_TICKS` ticks consecutivos → **se abre el trade**
+5. Una vez abierto un trade, el nivel queda **bloqueado** (`lockedLevelKey`) para ese `baseDay:level` hasta que el trade se cierre, evitando señales duplicadas.
+6. El trade se cierra automáticamente al alcanzar el TP o el SL. Se usa un flag `closing` para evitar dobles cierres en el mismo tick.
 
 **Niveles monitoreados:**
 - `S1`, `S2` → señal **LONG** (rebote alcista)
 - `R1`, `R2` → señal **SHORT** (rebote bajista)
+
+#### Cálculo de PnL y cantidad
+
+| Campo | Descripción |
+|-------|-------------|
+| `qty_btc` | Cantidad de BTC operada (configurable via `QTY_BTC`) |
+| `notional_in` | `qty × entryPrice` — valor en USDT al entrar |
+| `notional_out` | `qty × exitPrice` — valor en USDT al salir |
+| `pnl_usdt` | `(exitPrice − entryPrice) × qty` para LONG; inverso para SHORT |
+| `pivot_base_day_used` | El `base_day` del pivot que generó la señal |
 
 **Ejecutar:**
 ```bash
@@ -92,7 +108,10 @@ npm run dev
 
 Aplicación **React + Vite** que muestra en tiempo real:
 - Gráfico de velas con **Lightweight Charts**
-- Líneas de niveles Pivot (PP, R1, R2, S1, S2) obtenidas de Supabase
+- **Dos sets de líneas de niveles Fibonacci** obtenidos de Supabase:
+  - 🔶 **Ayer** — líneas `Dashed`, colores sólidos (R1, R2, R3, P, S1, S2, S3)
+  - 🔸 **Anteayer** — líneas `Dotted`, colores semitransparentes (R1-2, R2-2, …, S3-2)
+- Badge de precios de pivot para ambos días en la barra del gráfico
 - Estadísticas del mercado vía WebSocket de Binance
 
 **Ejecutar:**
@@ -112,6 +131,21 @@ npm run dev
 |-------|-------------|
 | `fib_pivot_daily` | Niveles Fibonacci diarios calculados por `listening_service` |
 | `sim_trades` | Operaciones abiertas/cerradas registradas por `detect_oportunity` |
+
+### Campos relevantes de `sim_trades`
+
+| Campo | Tipo | Descripción |
+|-------|------|-------------|
+| `pivot_base_day` | date | Día del pivot que generó la señal |
+| `level` | text | Nivel tocado (S1, S2, R1, R2) |
+| `side` | text | LONG o SHORT |
+| `entry_price` | numeric | Precio de entrada |
+| `tp_price` | numeric | Precio de take profit |
+| `sl_price` | numeric | Precio de stop loss |
+| `exit_price` | numeric | Precio de cierre |
+| `exit_reason` | text | TP o SL |
+| `pnl_usdt` | numeric | PnL real en USDT (con qty) |
+| `meta` | jsonb | Datos adicionales: `qty_btc`, `notional_in`, `notional_out`, `pivot_base_day_used`, etc. |
 
 ---
 
@@ -143,11 +177,15 @@ cp .env.example .env
 | `SYMBOL_DB` | Símbolo para guardar en BD | `BTCUSDT` |
 | `INTERVAL` | Intervalo de velas | `1m` |
 | `PIVOT_TABLE` | Tabla de pivots | `fib_pivot_daily` |
+| `TRADES_TABLE` | Tabla de trades | `sim_trades` |
 | `TOUCH_BUFFER_BPS` | Buffer de toque en puntos básicos | `2` |
 | `REBOUND_BPS` | Rebote mínimo en puntos básicos | `6` |
-| `CONFIRM_TICKS` | Ticks de confirmación | `3` |
-| `TP_USDT` | Take profit en USDT | `200` |
-| `SL_USDT` | Stop loss en USDT | `100` |
+| `CONFIRM_TICKS` | Ticks de confirmación consecutivos | `3` |
+| `TP_PCT` | Take profit porcentual | `0.0015` (0.15%) |
+| `SL_PCT` | Stop loss porcentual | `0.0015` (0.15%) |
+| `QTY_BTC` | Cantidad de BTC por operación | `0.0001` |
+| `MAX_OPEN_TRADES` | Máximo de trades abiertos simultáneos | `1` |
+| `COOLDOWN_MS` | Tiempo mínimo entre señales del mismo nivel | — |
 
 #### `front_market/.env`
 | Variable | Descripción |
@@ -172,6 +210,5 @@ cp .env.example .env
 
 ## ⚠️ Advertencias
 
-- **Nunca subas tu archivo `.env` al repositorio.** Contiene claves secretas de Supabase.
 - Este sistema es una **simulación de trading** (`sim_trades`). No ejecuta órdenes reales en Binance.
-- La `service_role_key` de Supabase tiene privilegios completos — solo úsala en los servicios de backend.
+- `QTY_BTC` define la cantidad de BTC por operación. Ajusta según el balance disponible y el margen del exchange.
