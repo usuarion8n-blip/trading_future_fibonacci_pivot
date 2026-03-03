@@ -44,40 +44,45 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 // ======================
 // Pivots loader
 // ======================
-async function loadLatestPivots() {
+async function loadRecentPivots(days = 2) {
     const { data, error } = await supabase
         .from(PIVOT_TABLE)
         .select("base_day, pp, r1, r2, r3, s1, s2, s3, symbol, interval, run_ts")
         .eq("symbol", SYMBOL_DB)
         .eq("interval", INTERVAL)
         .order("base_day", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+        .limit(days);
 
     if (error) throw error;
-    if (!data) throw new Error("No hay pivots en Supabase (fib_pivot_daily).");
+    if (!data || data.length === 0) throw new Error("No hay pivots en Supabase (fib_pivot_daily).");
 
-    return {
-        baseDay: data.base_day,
+    return data.map(row => ({
+        baseDay: row.base_day,
         levels: {
-            PP: Number(data.pp),
-            R1: Number(data.r1),
-            R2: Number(data.r2),
-            R3: Number(data.r3),
-            S1: Number(data.s1),
-            S2: Number(data.s2),
-            S3: Number(data.s3),
+            PP: Number(row.pp),
+            R1: Number(row.r1),
+            R2: Number(row.r2),
+            R3: Number(row.r3),
+            S1: Number(row.s1),
+            S2: Number(row.s2),
+            S3: Number(row.s3),
         },
-    };
+    }));
 }
 
-let pivots = null;
+let pivotsList = [];
 let lastPrintTs = 0;
 
 async function refreshPivots() {
     try {
-        pivots = await loadLatestPivots();
-        console.log("✅ Pivots cargados:", pivots.baseDay, pivots.levels);
+        pivotsList = await loadRecentPivots(2);
+
+        console.log("✅ Pivots cargados (2 días):");
+        for (const p of pivotsList) {
+            console.log("  - baseDay:", p.baseDay, "levels:", {
+                S1: p.levels.S1, S2: p.levels.S2, R1: p.levels.R1, R2: p.levels.R2, PP: p.levels.PP
+            });
+        }
     } catch (e) {
         console.error("❌ No pude cargar pivots:", e.message);
     }
@@ -101,17 +106,17 @@ function canOpenNewTrade() {
 }
 
 // para evitar spam de señales por nivel+lado
-const lastSignalAt = new Map(); // `${level}:${side}` -> ts
+const lastSignalAt = new Map();
 
-async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
-    const key = `${level}:${side}`;
+async function openTrade({ side, level, levelPrice, distBps, bid, ask, pivot_base_day_used }) {
+    const key = `${pivot_base_day_used}:${level}:${side}`;
     const nowMs = Date.now();
     const last = lastSignalAt.get(key) || 0;
     if (nowMs - last < COOLDOWN_MS) return null;
     lastSignalAt.set(key, nowMs);
 
     if (!canOpenNewTrade()) return null;
-    if (!pivots?.baseDay) return null;
+    if (!pivot_base_day_used) return null;
 
     // ✅ entry real
     const entryPrice = side === "LONG" ? ask : bid;
@@ -131,7 +136,7 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
     const row = {
         symbol: SYMBOL_DB,
         interval: INTERVAL,
-        pivot_base_day: pivots.baseDay,
+        pivot_base_day: pivot_base_day_used,
         level,
         side,
         entry_ts: entryTs,
@@ -154,6 +159,7 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
             sl_delta: slDelta,
             qty_btc: qty,
             notional_in,
+            pivot_base_day_used,
         },
     };
 
@@ -180,6 +186,7 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
         qty,                       // ✅ necesario
         meta: row.meta,            // ✅ guarda meta de entrada para merge
         closing: false,            // ✅ evita dobles cierres
+        pivot_base_day_used,
     });
 
     console.log("🟢 OPEN TRADE", {
@@ -189,10 +196,20 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
         entryPrice,
         tpPrice,
         slPrice,
-        pivot_base_day: pivots.baseDay,
+        pivot_base_day: pivot_base_day_used,
         qty_btc: qty,
         notional_in: Number(notional_in.toFixed(4)),
     });
+
+    // ✅ BLOQUEA este nivel hasta que haya trade en otro nivel distinto
+    lockedLevelKey = levelKey(pivot_base_day_used, level);
+
+    // (opcional) resetea estado de detección para ese nivel
+    const dk = detKey(pivot_base_day_used, level);
+    detectorTouched.set(dk, false);
+    detectorConfirm.set(dk, 0);
+
+    console.log("🔒 Nivel bloqueado:", lockedLevelKey);
 
     return data.id;
 }
@@ -254,6 +271,14 @@ async function closeTrade({ tradeId, bid, ask, reason }) {
     });
 }
 
+// ✅ Bloqueo del último nivel que generó trade
+// Formato: `${baseDay}:${level}`  ej: "2026-03-01:R2"
+let lockedLevelKey = null;
+
+function levelKey(baseDay, level) {
+    return `${baseDay}:${level}`;
+}
+
 async function restoreOpenTrades() {
     const { data, error } = await supabase
         .from(TRADES_TABLE)
@@ -280,6 +305,7 @@ async function restoreOpenTrades() {
             qty: Number(t.meta?.qty_btc ?? QTY_BTC),
             meta: t.meta || {},
             closing: false,
+            pivot_base_day_used: t.meta?.pivot_base_day_used,
         });
     }
 
@@ -314,99 +340,132 @@ function checkOpenTrades({ bid, ask }) {
 // ======================
 // Rebound detector
 // ======================
-const detectorState = {
-    touched: { S1: false, S2: false, R1: false, R2: false },
-    confirm: { S1: 0, S2: 0, R1: 0, R2: 0 },
-};
+const detectorTouched = new Map(); // key = `${baseDay}:${level}` -> boolean
+const detectorConfirm = new Map(); // key = `${baseDay}:${level}` -> number
+
+function detKey(baseDay, level) {
+    return `${baseDay}:${level}`;
+}
 
 async function processQuote({ bid, ask }) {
-    if (!pivots?.levels) return;
+    if (!pivotsList.length) return;
 
-    // primero: track trades abiertos
+    // track trades abiertos
     checkOpenTrades({ bid, ask });
 
-    const levelsToWatch = [
-        { level: "S1", side: "LONG" },
-        { level: "S2", side: "LONG" },
-        { level: "R1", side: "SHORT" },
-        { level: "R2", side: "SHORT" },
-    ];
+    // genera niveles de ambos días
+    const levelsToWatch = [];
+    for (const p of pivotsList) {
+        levelsToWatch.push(
+            { baseDay: p.baseDay, level: "S1", side: "LONG", price: p.levels.S1 },
+            { baseDay: p.baseDay, level: "S2", side: "LONG", price: p.levels.S2 },
+            { baseDay: p.baseDay, level: "R1", side: "SHORT", price: p.levels.R1 },
+            { baseDay: p.baseDay, level: "R2", side: "SHORT", price: p.levels.R2 },
+        );
+    }
 
     for (const item of levelsToWatch) {
-        const levelPrice = pivots.levels[item.level];
+        const levelPrice = item.price;
 
-        // LONG se “mide” contra ASK (compra), SHORT contra BID (venta)
+        // LONG mide ASK, SHORT mide BID
         const refPrice = item.side === "LONG" ? ask : bid;
 
         const distBps = bpsDistance(refPrice, levelPrice);
         const absBps = Math.abs(distBps);
 
+        const k = detKey(item.baseDay, item.level);
+
+        const lvlKey = levelKey(item.baseDay, item.level);
+
+        // ✅ Si este nivel está bloqueado, no lo proceses
+        if (lockedLevelKey === lvlKey) {
+            continue;
+        }
+
         // 1) touch
-        if (!detectorState.touched[item.level] && absBps <= TOUCH_BUFFER_BPS) {
-            detectorState.touched[item.level] = true;
-            detectorState.confirm[item.level] = 0;
+        if (!detectorTouched.get(k) && absBps <= TOUCH_BUFFER_BPS) {
+            detectorTouched.set(k, true);
+            detectorConfirm.set(k, 0);
             continue;
         }
 
         // 2) confirm rebote
-        if (detectorState.touched[item.level]) {
-            if (item.side === "LONG") {
-                if (distBps >= REBOUND_BPS) detectorState.confirm[item.level] += 1;
-                else detectorState.confirm[item.level] = 0;
+        if (detectorTouched.get(k)) {
+            const prev = detectorConfirm.get(k) || 0;
 
-                if (detectorState.confirm[item.level] >= CONFIRM_TICKS) {
+            if (item.side === "LONG") {
+                const next = distBps >= REBOUND_BPS ? (prev + 1) : 0;
+                detectorConfirm.set(k, next);
+
+                if (next >= CONFIRM_TICKS) {
                     await openTrade({
                         side: "LONG",
                         level: item.level,
                         levelPrice,
                         distBps,
                         bid, ask,
+                        pivot_base_day_used: item.baseDay,   // ✅ nuevo
                     });
-                    detectorState.touched[item.level] = false;
-                    detectorState.confirm[item.level] = 0;
+                    detectorTouched.set(k, false);
+                    detectorConfirm.set(k, 0);
                 }
             } else {
-                if (distBps <= -REBOUND_BPS) detectorState.confirm[item.level] += 1;
-                else detectorState.confirm[item.level] = 0;
+                const next = distBps <= -REBOUND_BPS ? (prev + 1) : 0;
+                detectorConfirm.set(k, next);
 
-                if (detectorState.confirm[item.level] >= CONFIRM_TICKS) {
+                if (next >= CONFIRM_TICKS) {
                     await openTrade({
                         side: "SHORT",
                         level: item.level,
                         levelPrice,
                         distBps,
                         bid, ask,
+                        pivot_base_day_used: item.baseDay,   // ✅ nuevo
                     });
-                    detectorState.touched[item.level] = false;
-                    detectorState.confirm[item.level] = 0;
+                    detectorTouched.set(k, false);
+                    detectorConfirm.set(k, 0);
                 }
             }
 
             // reset por invalidez
             if (absBps > 50) {
-                detectorState.touched[item.level] = false;
-                detectorState.confirm[item.level] = 0;
+                detectorTouched.set(k, false);
+                detectorConfirm.set(k, 0);
             }
         }
     }
 }
 
 function printLevels({ bid, ask }) {
-    if (!pivots?.levels) return;
+    if (!pivotsList.length) return;
+
     const now = Date.now();
     if (now - lastPrintTs < PRINT_EVERY_MS) return;
     lastPrintTs = now;
 
-    const { S1, S2, R1, R2 } = pivots.levels;
+    const ts = new Date().toISOString();
 
-    console.log(
-        `[${new Date().toISOString()}] BID:${bid} ASK:${ask}` +
-        ` | S2:${S2} (ask ${bpsDistance(ask, S2).toFixed(2)}bps)` +
-        ` | S1:${S1} (ask ${bpsDistance(ask, S1).toFixed(2)}bps)` +
-        ` | R1:${R1} (bid ${bpsDistance(bid, R1).toFixed(2)}bps)` +
-        ` | R2:${R2} (bid ${bpsDistance(bid, R2).toFixed(2)}bps)` +
-        ` | openTrades:${openTrades.size}`
-    );
+    // Encabezado simple
+    console.log(`${ts} BID=${bid} ASK=${ask} openTrades=${openTrades.size}`);
+
+    // 1 línea por pivot-day (sin tablas, sin bordes)
+    for (const p of pivotsList) {
+        const { S1, S2, R1, R2 } = p.levels;
+
+        const askS2 = bpsDistance(ask, S2).toFixed(2);
+        const askS1 = bpsDistance(ask, S1).toFixed(2);
+        const bidR1 = bpsDistance(bid, R1).toFixed(2);
+        const bidR2 = bpsDistance(bid, R2).toFixed(2);
+
+        // formato “solo datos”
+        console.log(
+            `baseDay=${p.baseDay}` +
+            ` S2=${S2} askS2bps=${askS2}` +
+            ` S1=${S1} askS1bps=${askS1}` +
+            ` R1=${R1} bidR1bps=${bidR1}` +
+            ` R2=${R2} bidR2bps=${bidR2}`
+        );
+    }
 }
 
 // ======================
