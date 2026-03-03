@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BTC/USDT · Live Market</title>
+  <meta name="description" content="Panel de trading en tiempo real para BTC/USDT usando el WebSocket de Binance Futures" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <!-- Lightweight Charts by TradingView -->
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Background animated grid -->
+  <div class="bg-grid"></div>
+
+  <div class="app">
+    <!-- ── Header ── -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
+            <circle cx="16" cy="16" r="16" fill="#F7931A"/>
+            <path d="M22.5 13.5c.3-2.1-1.3-3.2-3.5-4l.7-2.8-1.7-.4-.7 2.7c-.4-.1-.9-.2-1.4-.3l.7-2.7-1.7-.4-.7 2.8c-.4-.1-.7-.2-1-.2v0l-2.4-.6-.5 1.8s1.3.3 1.2.3c.7.2.8.7.8 1l-.8 3.3c0 0 .1 0 .1 0l-.1 0-1.2 4.6c-.1.2-.3.6-.9.4 0 .1-1.2-.3-1.2-.3L9 20.8l2.2.6c.4.1.8.2 1.2.3l-.7 2.9 1.7.4.7-2.8c.5.1.9.2 1.4.4l-.7 2.8 1.7.4.7-2.8c2.9.5 5.1.3 6-2.3.7-2-.0-3.2-1.5-3.9 1.1-.2 1.9-1 2.1-2.6zm-3.8 5.3c-.5 2-3.9 1-5.1.6l.9-3.6c1.1.3 4.7.8 4.2 3zm.5-5.3c-.5 1.8-3.3 1-4.3.7l.8-3.3c1 .3 4 .8 3.5 2.6z" fill="white"/>
+          </svg>
+          <span class="logo-text">BTC<span class="logo-pair">/USDT</span></span>
+        </div>
+        <div class="badge badge--futures">FUTURES · PERPETUAL</div>
+      </div>
+
+      <div class="header-right">
+        <div class="ws-status" id="wsStatus">
+          <span class="ws-dot" id="wsDot"></span>
+          <span id="wsLabel">Conectando…</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- ── Price Hero ── -->
+    <section class="price-hero">
+      <div class="price-main">
+        <span class="price-label">MARK PRICE</span>
+        <div class="price-value" id="priceValue">—</div>
+        <div class="price-change" id="priceChange">
+          <span id="changeIcon">▲</span>
+          <span id="changePct">0.00%</span>
+          <span id="changeAbs">+0.00</span>
+          <span class="change-period">vs apertura</span>
+        </div>
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Funding Rate</span>
+          <span class="stat-value" id="fundingRate">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Próximo Funding</span>
+          <span class="stat-value" id="nextFunding">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Máximo (sesión)</span>
+          <span class="stat-value" id="sessionHigh">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Mínimo (sesión)</span>
+          <span class="stat-value" id="sessionLow">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Último update</span>
+          <span class="stat-value mono" id="lastUpdate">—</span>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Ticks recibidos</span>
+          <span class="stat-value mono" id="tickCount">0</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Chart ── -->
+    <section class="chart-section">
+      <div class="chart-toolbar">
+        <div class="chart-title">Precio en tiempo real</div>
+        <div class="tf-buttons" id="tfButtons">
+          <button class="tf-btn active" data-seconds="60">1m</button>
+          <button class="tf-btn" data-seconds="300">5m</button>
+          <button class="tf-btn" data-seconds="900">15m</button>
+          <button class="tf-btn" data-seconds="3600">1h</button>
+        </div>
+      </div>
+      <div class="chart-container" id="chartContainer"></div>
+    </section>
+
+    <!-- ── Ticker Feed ── -->
+    <section class="feed-section">
+      <div class="feed-header">
+        <h2 class="feed-title">Feed de ticks</h2>
+        <button class="clear-btn" id="clearFeed">Limpiar</button>
+      </div>
+      <div class="feed-list" id="feedList"></div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

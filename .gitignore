@@ -1,0 +1,73 @@
+# ==========================
+# Dependencias de Node.js
+# ==========================
+node_modules/
+**/node_modules/
+
+# ==========================
+# Variables de entorno (SENSIBLE - NO subir claves API ni credenciales)
+# ==========================
+.env
+**/.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================
+# Build / Dist (front_market con Vite)
+# ==========================
+dist/
+build/
+.vite/
+
+# ==========================
+# Caché y archivos temporales
+# ==========================
+.cache/
+.parcel-cache/
+.npm/
+.eslintcache
+.stylelintcache
+*.tmp
+*.temp
+
+# ==========================
+# Sistema operativo
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Editores e IDEs
+# ==========================
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ==========================
+# Docker
+# ==========================
+docker-compose.override.yml
+
+# ==========================
+# Misceláneos
+# ==========================
+coverage/
+.nyc_output/
