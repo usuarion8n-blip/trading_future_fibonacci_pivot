@@ -25,8 +25,8 @@ const CONFIRM_TICKS = Number(process.env.CONFIRM_TICKS ?? 3);
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS ?? (2 * 60_000));
 
 // trade rules
-const TP_USDT = Number(process.env.TP_USDT ?? 200);
-const SL_USDT = Number(process.env.SL_USDT ?? 100);
+const TP_PCT = Number(process.env.TP_PCT ?? 0.0015); // 0.15%
+const SL_PCT = Number(process.env.SL_PCT ?? 0.0015); // 0.15% (mismo)
 
 // tracker
 const MAX_OPEN_TRADES = Number(process.env.MAX_OPEN_TRADES ?? 1); // 1 para no abrir múltiples a la vez
@@ -116,8 +116,11 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
     const entryPrice = side === "LONG" ? ask : bid;
 
     // ✅ TP/SL en USDT desde entry
-    const tpPrice = side === "LONG" ? entryPrice + TP_USDT : entryPrice - TP_USDT;
-    const slPrice = side === "LONG" ? entryPrice - SL_USDT : entryPrice + SL_USDT;
+    const tpDelta = entryPrice * TP_PCT;
+    const slDelta = entryPrice * SL_PCT;
+
+    const tpPrice = side === "LONG" ? entryPrice + tpDelta : entryPrice - tpDelta;
+    const slPrice = side === "LONG" ? entryPrice - slDelta : entryPrice + slDelta;
 
     const entryTs = new Date().toISOString();
 
@@ -142,8 +145,10 @@ async function openTrade({ side, level, levelPrice, distBps, bid, ask }) {
             confirm_ticks: CONFIRM_TICKS,
             distance_bps_at_signal: Number(distBps.toFixed(2)),
             pivot_price: levelPrice,
-            tp_usdt: TP_USDT,
-            sl_usdt: SL_USDT,
+            tp_pct: TP_PCT,
+            sl_pct: SL_PCT,
+            tp_delta: tpDelta,
+            sl_delta: slDelta,
         },
     };
 
