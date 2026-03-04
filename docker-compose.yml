@@ -1,55 +1,63 @@
-# =============================================================
-# Trading Futures — Docker Compose
-# =============================================================
-# Servicios:
-#   front_market      → React + Vite compilado, servido con Nginx (puerto 80)
-#   detect_oportunity → Bot Node.js (WebSocket Binance + Supabase), proceso permanente
-#   listening_service → Cronjob Node.js (pivots diarios a las 00:05 UTC)
-#
-# Uso:
-#   1. Copia y rellena los .env de cada servicio en el servidor
-#   2. docker compose up -d --build
-# =============================================================
-
 services:
-
-  # -----------------------------------------------------------
-  # Frontend React (Nginx)
-  # IMPORTANTE: Las variables VITE_* se embeben en BUILD TIME.
-  # Pásalas como args aquí o con: docker compose build --build-arg ...
-  # -----------------------------------------------------------
-  front_market:
-    build:
-      context: ./front_market
-      dockerfile: Dockerfile
-      args:
-        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
-        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
-    container_name: front_market
-    restart: unless-stopped
-    ports:
-      - "80:80"
-
-  # -----------------------------------------------------------
-  # Bot detector de oportunidades (proceso permanente)
-  # -----------------------------------------------------------
-  detect_oportunity:
-    build:
-      context: ./detect_oportunity
-      dockerfile: Dockerfile
-    container_name: detect_oportunity
-    restart: unless-stopped
-    env_file:
-      - ./detect_oportunity/.env
-
-  # -----------------------------------------------------------
-  # Cronjob de pivots (se lanza a las 00:05 UTC cada día)
-  # -----------------------------------------------------------
+  # =========================
+  # 1) Cron diario pivots
+  # =========================
   listening_service:
     build:
       context: ./listening_service
-      dockerfile: Dockerfile
-    container_name: listening_service
-    restart: unless-stopped
     env_file:
       - ./listening_service/.env
+    environment:
+      TZ: "UTC"
+      CRON_SCHEDULE: "5 0 * * *"
+      CRON_COMMAND: "node src/index.js"
+    restart: unless-stopped
+    networks:
+      - trading_net
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # =========================
+  # 2) Bot realtime (trading)
+  # =========================
+  detect_opportunity:
+    build:
+      context: ./detect_opportunity
+    env_file:
+      - ./detect_opportunity/.env
+    restart: unless-stopped
+    depends_on:
+      - listening_service
+    networks:
+      - trading_net
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # =========================
+  # 3) Front (Vite + Nginx)
+  # =========================
+  front_market:
+    build:
+      context: ./front_market
+      args:
+        VITE_SUPABASE_URL: ${VITE_SUPABASE_URL}
+        VITE_SUPABASE_ANON_KEY: ${VITE_SUPABASE_ANON_KEY}
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    depends_on:
+      - detect_opportunity
+    networks:
+      - trading_net
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+networks:
+  trading_net:
+    driver: bridge
