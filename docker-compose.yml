@@ -19,9 +19,9 @@ services:
   detect_opportunity:
     image: aeor06/trading_future:detect_opportunity
     build:
-      context: ./detect_opportunity
+      context: ./detect_oportunity
     env_file:
-      - ./detect_opportunity/.env
+      - ./detect_oportunity/.env
     restart: unless-stopped
     depends_on: [ listening_service ]
     networks: [ trading_net ]
