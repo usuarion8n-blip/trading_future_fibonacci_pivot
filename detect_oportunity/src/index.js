@@ -557,14 +557,16 @@ async function restoreOpenTrades() {
 async function processQuote({ bid, ask }) {
     if (!pivotsList.length) return;
 
-    // niveles de 2 días
+    // niveles de 2 días (incluye S1,S2,S3 y R1,R2,R3)
     const levelsToWatch = [];
     for (const p of pivotsList) {
         levelsToWatch.push(
             { baseDay: p.baseDay, level: "S1", side: "LONG", price: p.levels.S1 },
             { baseDay: p.baseDay, level: "S2", side: "LONG", price: p.levels.S2 },
+            { baseDay: p.baseDay, level: "S3", side: "LONG", price: p.levels.S3 }, // ✅ nuevo
             { baseDay: p.baseDay, level: "R1", side: "SHORT", price: p.levels.R1 },
             { baseDay: p.baseDay, level: "R2", side: "SHORT", price: p.levels.R2 },
+            { baseDay: p.baseDay, level: "R3", side: "SHORT", price: p.levels.R3 }, // ✅ nuevo
         );
     }
 
@@ -647,13 +649,16 @@ function printLevels({ bid, ask }) {
     console.log(`${ts} DRY_RUN=${DRY_RUN ? 1 : 0} BID=${bid} ASK=${ask} openTrades=${openTrades.size} locked=${lockedLevelKey || "-"}`);
 
     for (const p of pivotsList) {
-        const { S1, S2, R1, R2 } = p.levels;
+        const { S1, S2, S3, R1, R2, R3 } = p.levels;
+
         console.log(
             `baseDay=${p.baseDay}` +
+            ` S3=${S3} askS3bps=${bpsDistance(ask, S3).toFixed(2)}` +
             ` S2=${S2} askS2bps=${bpsDistance(ask, S2).toFixed(2)}` +
             ` S1=${S1} askS1bps=${bpsDistance(ask, S1).toFixed(2)}` +
             ` R1=${R1} bidR1bps=${bpsDistance(bid, R1).toFixed(2)}` +
-            ` R2=${R2} bidR2bps=${bpsDistance(bid, R2).toFixed(2)}`
+            ` R2=${R2} bidR2bps=${bpsDistance(bid, R2).toFixed(2)}` +
+            ` R3=${R3} bidR3bps=${bpsDistance(bid, R3).toFixed(2)}`
         );
     }
 }
