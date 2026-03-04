@@ -1,8 +1,6 @@
 services:
-  # =========================
-  # 1) Cron diario pivots
-  # =========================
   listening_service:
+    image: aeor06/trading_future:listening_service
     build:
       context: ./listening_service
     env_file:
@@ -12,35 +10,28 @@ services:
       CRON_SCHEDULE: "5 0 * * *"
       CRON_COMMAND: "node src/index.js"
     restart: unless-stopped
-    networks:
-      - trading_net
+    networks: [ trading_net ]
     logging:
       options:
         max-size: "10m"
         max-file: "5"
 
-  # =========================
-  # 2) Bot realtime (trading)
-  # =========================
   detect_opportunity:
+    image: aeor06/trading_future:detect_opportunity
     build:
       context: ./detect_opportunity
     env_file:
       - ./detect_opportunity/.env
     restart: unless-stopped
-    depends_on:
-      - listening_service
-    networks:
-      - trading_net
+    depends_on: [ listening_service ]
+    networks: [ trading_net ]
     logging:
       options:
         max-size: "10m"
         max-file: "5"
 
-  # =========================
-  # 3) Front (Vite + Nginx)
-  # =========================
   front_market:
+    image: aeor06/trading_future:front_market
     build:
       context: ./front_market
       args:
@@ -49,10 +40,8 @@ services:
     ports:
       - "80:80"
     restart: unless-stopped
-    depends_on:
-      - detect_opportunity
-    networks:
-      - trading_net
+    depends_on: [ detect_opportunity ]
+    networks: [ trading_net ]
     logging:
       options:
         max-size: "10m"
