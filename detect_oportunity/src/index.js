@@ -317,7 +317,8 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             side: closeSide,
             type: "TAKE_PROFIT_MARKET",
             stopPrice: fmt(tpPrice, priceDec),
-            closePosition: "true",
+            reduceOnly: "true",
+            quantity: fmt(qtyAdj, qtyDec),
             workingType: "CONTRACT_PRICE",
         });
 
@@ -326,7 +327,8 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             side: closeSide,
             type: "STOP_MARKET",
             stopPrice: fmt(slPrice, priceDec),
-            closePosition: "true",
+            reduceOnly: "true",
+            quantity: fmt(qtyAdj, qtyDec),
             workingType: "CONTRACT_PRICE",
         });
     } catch (e) {
