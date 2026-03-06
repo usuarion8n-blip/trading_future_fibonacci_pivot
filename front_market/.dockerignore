@@ -1,0 +1,75 @@
+# ==========================
+# Dependencias de Node.js
+# ==========================
+node_modules/
+
+# ==========================
+# Variables de entorno
+# ==========================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+
+# ==========================
+# Build / Dist (generado en la imagen)
+# ==========================
+dist/
+build/
+.vite/
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================
+# Caché y archivos temporales
+# ==========================
+.cache/
+.parcel-cache/
+.npm/
+.eslintcache
+.stylelintcache
+*.tmp
+*.temp
+
+# ==========================
+# Sistema operativo
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Editores e IDEs
+# ==========================
+.vscode/
+.idea/
+*.suo
+*.sw?
+
+# ==========================
+# Código legacy / carpetas internas
+# ==========================
+.vanilla/
+
+# ==========================
+# Git
+# ==========================
+.git/
+.gitignore
+
+# ==========================
+# CI / misceláneos
+# ==========================
+coverage/
+.nyc_output/
+README.md
