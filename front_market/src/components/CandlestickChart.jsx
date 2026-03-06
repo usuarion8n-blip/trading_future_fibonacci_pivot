@@ -18,6 +18,67 @@ const TIMEFRAMES = [
 ]
 
 const MAX_CANDLES = 500
+const LS_CHART_KEY = 'fm_chart_state'
+
+/** Mapeo de segundos → intervalo de Binance */
+const TF_TO_INTERVAL = {
+    60: '1m',
+    300: '5m',
+    900: '15m',
+    3600: '1h',
+}
+
+/** Devuelve la clave de candles para un timeframe específico */
+function candlesKey(tf) { return `${LS_CHART_KEY}_candles_${tf}` }
+
+/** Lee las velas guardadas para un timeframe desde localStorage */
+function loadCandles(tf) {
+    try {
+        const raw = localStorage.getItem(candlesKey(tf))
+        return raw ? JSON.parse(raw) : []
+    } catch { return [] }
+}
+
+/** Guarda el array de velas para un timeframe en localStorage */
+function saveCandles(tf, candles) {
+    try {
+        localStorage.setItem(candlesKey(tf), JSON.stringify(candles.slice(-MAX_CANDLES)))
+    } catch { /* cuota llena → ignorar */ }
+}
+
+/** Lee el último timeframe activo guardado */
+function loadActiveTf() {
+    try {
+        const v = localStorage.getItem(`${LS_CHART_KEY}_tf`)
+        const n = v ? parseInt(v, 10) : 60
+        return TF_TO_INTERVAL[n] ? n : 60
+    } catch { return 60 }
+}
+
+/** Guarda el timeframe activo */
+function saveActiveTf(tf) {
+    try { localStorage.setItem(`${LS_CHART_KEY}_tf`, String(tf)) } catch { }
+}
+
+/**
+ * Descarga klines históricos de Binance Futures REST API.
+ * Devuelve array de { time, open, high, low, close } ordenado.
+ */
+async function fetchKlines(tf, limit = 500) {
+    const interval = TF_TO_INTERVAL[tf] ?? '1m'
+    const url = `https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Binance klines error: ${res.status}`)
+    const data = await res.json()
+    // data[i] = [openTime, open, high, low, close, volume, closeTime, ...]
+    return data.map(k => ({
+        time: Math.floor(k[0] / 1000),  // openTime en segundos
+        open: parseFloat(k[1]),
+        high: parseFloat(k[2]),
+        low: parseFloat(k[3]),
+        close: parseFloat(k[4]),
+    }))
+}
 
 // Yesterday's lines — dashed, bright
 const PIVOT_LINES = [
@@ -45,16 +106,56 @@ export default function CandlestickChart({ priceObj }) {
     const containerRef = useRef(null)
     const chartRef = useRef(null)
     const seriesRef = useRef(null)
-    const candleMapRef = useRef(new Map())
+
+    // Restaurar timeframe y candles desde localStorage antes del primer render
+    const initialTf = loadActiveTf()
+    const initialCandles = loadCandles(initialTf)
+    const initialMap = new Map(initialCandles.map(c => [c.time, c]))
+
+    const candleMapRef = useRef(initialMap)
     const priceLinesRef = useRef([])       // yesterday price lines
     const prevPriceLinesRef = useRef([])   // day-before price lines
-    const [activeTf, setActiveTf] = useState(60)
+    const [activeTf, setActiveTf] = useState(initialTf)
+    const [klineLoading, setKlineLoading] = useState(false)
 
     const { levels, prevLevels, loading: pivotLoading, error: pivotError } = useFibPivot()
 
     // Store activeTf in a ref so the onmessage closure uses the latest value
-    const tfRef = useRef(activeTf)
+    const tfRef = useRef(initialTf)
     useEffect(() => { tfRef.current = activeTf }, [activeTf])
+
+    /**
+     * Carga klines históricos de Binance para un TF dado,
+     * los fusiona con lo que haya en localStorage (para no perder
+     * la vela en curso) y renderiza en el chart.
+     */
+    const applyKlines = useCallback(async (tf) => {
+        if (!seriesRef.current) return
+        setKlineLoading(true)
+        try {
+            const apiCandles = await fetchKlines(tf)
+            // Fusionar: API como base + velas locales más recientes encima
+            const savedCandles = loadCandles(tf)
+            const map = new Map(apiCandles.map(c => [c.time, c]))
+            // Las velas locales pueden tener la vela parcial actual → las superponemos
+            savedCandles.forEach(c => map.set(c.time, c))
+            const merged = [...map.values()].sort((a, b) => a.time - b.time)
+            candleMapRef.current = map
+            seriesRef.current.setData(merged)
+            saveCandles(tf, merged)
+        } catch (err) {
+            console.warn('[Chart] Error fetching klines:', err)
+            // Fallback: usar lo que haya en localStorage
+            const saved = loadCandles(tf)
+            if (saved.length > 0) {
+                const map = new Map(saved.map(c => [c.time, c]))
+                candleMapRef.current = map
+                seriesRef.current.setData(saved)
+            }
+        } finally {
+            setKlineLoading(false)
+        }
+    }, [])
 
     // Init chart once on mount
     useEffect(() => {
@@ -96,6 +197,15 @@ export default function CandlestickChart({ priceObj }) {
         chartRef.current = chart
         seriesRef.current = series
 
+        // Mostrar velas de localStorage inmediatamente (sin esperar a la API)
+        const savedCandles = [...candleMapRef.current.values()].sort((a, b) => a.time - b.time)
+        if (savedCandles.length > 0) {
+            series.setData(savedCandles)
+        }
+
+        // Luego refrescar con datos históricos reales de Binance
+        applyKlines(tfRef.current)
+
         // Responsive resize
         const ro = new ResizeObserver(() => {
             chart.applyOptions({
@@ -109,7 +219,7 @@ export default function CandlestickChart({ priceObj }) {
             ro.disconnect()
             chart.remove()
         }
-    }, []) // run once
+    }, [applyKlines]) // eslint-disable-line react-hooks/exhaustive-deps
 
     // Helper to draw a set of price lines
     function drawLines(levelData, lineDefinitions, linesRef) {
@@ -176,14 +286,23 @@ export default function CandlestickChart({ priceObj }) {
         }
 
         seriesRef.current.setData(candles)
+        saveCandles(tfRef.current, candles)
     }, [priceObj])
 
     // Change timeframe
     const handleTfChange = useCallback((seconds) => {
+        if (seconds === tfRef.current) return // ya estamos en este TF
         setActiveTf(seconds)
-        candleMapRef.current.clear()
-        if (seriesRef.current) seriesRef.current.setData([])
-    }, [])
+        saveActiveTf(seconds)
+        tfRef.current = seconds
+        // Mostrar velas de localStorage del nuevo TF de inmediato
+        const saved = loadCandles(seconds)
+        const newMap = new Map(saved.map(c => [c.time, c]))
+        candleMapRef.current = newMap
+        if (seriesRef.current) seriesRef.current.setData(saved)
+        // Luego enriquecer con datos históricos reales
+        applyKlines(seconds)
+    }, [applyKlines])
 
     return (
         <section className="chart-section">
@@ -202,6 +321,7 @@ export default function CandlestickChart({ priceObj }) {
                 </div>
                 {/* Pivot status badge */}
                 <div className="pivot-status">
+                    {klineLoading && <span className="pivot-badge loading">⏳ Cargando velas…</span>}
                     {pivotLoading && <span className="pivot-badge loading">⏳ Cargando pivots…</span>}
                     {pivotError && <span className="pivot-badge error">⚠ Error al cargar pivots</span>}
                     {levels && !pivotLoading && (

@@ -7,6 +7,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 
 const WS_URL = 'wss://fstream.binance.com/ws/btcusdt@markPrice@1s'
 const MAX_TICKS = 50
+const LS_KEY = 'fm_market_state'
 
 function formatPrice(val) {
     return parseFloat(val).toLocaleString('en-US', {
@@ -24,28 +25,49 @@ function formatCountdown(nextFundingTimeMs) {
     return [h, m, s].map(n => String(n).padStart(2, '0')).join(':')
 }
 
+/** Lee el estado guardado en localStorage (o devuelve null si no existe/error). */
+function loadSavedState() {
+    try {
+        const raw = localStorage.getItem(LS_KEY)
+        return raw ? JSON.parse(raw) : null
+    } catch {
+        return null
+    }
+}
+
+/** Guarda campos relevantes en localStorage. */
+function saveState(patch) {
+    try {
+        const prev = loadSavedState() ?? {}
+        localStorage.setItem(LS_KEY, JSON.stringify({ ...prev, ...patch }))
+    } catch { /* cuota llena u otro error → ignorar */ }
+}
+
 export function useMarketWebSocket() {
+    // Carga estado previo UNA vez al inicio
+    const saved = useRef(loadSavedState())
+
     const [wsStatus, setWsStatus] = useState('connecting') // connecting | connected | reconnecting | error
     const [price, setPrice] = useState(null)
     const [prevPrice, setPrevPrice] = useState(null)
-    const [openPrice, setOpenPrice] = useState(null)
-    const [sessionHigh, setSessionHigh] = useState(null)
-    const [sessionLow, setSessionLow] = useState(null)
-    const [fundingRate, setFundingRate] = useState(null)
+    const [openPrice, setOpenPrice] = useState(saved.current?.openPrice ?? null)
+    const [sessionHigh, setSessionHigh] = useState(saved.current?.sessionHigh ?? null)
+    const [sessionLow, setSessionLow] = useState(saved.current?.sessionLow ?? null)
+    const [fundingRate, setFundingRate] = useState(saved.current?.fundingRate ?? null)
     const [nextFundingTime, setNextFundingTime] = useState(null)
     const [countdown, setCountdown] = useState('—')
-    const [lastUpdate, setLastUpdate] = useState('—')
-    const [tickCount, setTickCount] = useState(0)
-    const [ticks, setTicks] = useState([])
+    const [lastUpdate, setLastUpdate] = useState(saved.current?.lastUpdate ?? '—')
+    const [tickCount, setTickCount] = useState(saved.current?.ticks?.length ?? 0)
+    const [ticks, setTicks] = useState(saved.current?.ticks ?? [])
 
     // Internal refs — avoid closure staleness
     const wsRef = useRef(null)
     const reconnTimerRef = useRef(null)
     const attemptsRef = useRef(0)
-    const openPriceRef = useRef(null)
-    const highRef = useRef(-Infinity)
-    const lowRef = useRef(Infinity)
-    const tickIdRef = useRef(0)
+    const openPriceRef = useRef(saved.current?.openPrice ?? null)
+    const highRef = useRef(saved.current?.sessionHigh ?? -Infinity)
+    const lowRef = useRef(saved.current?.sessionLow ?? Infinity)
+    const tickIdRef = useRef(saved.current?.ticks?.length ?? 0)
     const nextFundRef = useRef(null)
 
     // Countdown ticker
@@ -82,18 +104,25 @@ export function useMarketWebSocket() {
                 if (openPriceRef.current === null) {
                     openPriceRef.current = newPrice
                     setOpenPrice(newPrice)
+                    saveState({ openPrice: newPrice })
                 }
                 if (newPrice > highRef.current) {
                     highRef.current = newPrice
                     setSessionHigh(newPrice)
+                    saveState({ sessionHigh: newPrice })
                 }
                 if (newPrice < lowRef.current) {
                     lowRef.current = newPrice
                     setSessionLow(newPrice)
+                    saveState({ sessionLow: newPrice })
                 }
 
                 // Funding
-                if (funding !== undefined) setFundingRate(parseFloat(funding))
+                if (funding !== undefined) {
+                    const fr = parseFloat(funding)
+                    setFundingRate(fr)
+                    saveState({ fundingRate: fr })
+                }
                 if (nextTime) {
                     nextFundRef.current = nextTime
                     setNextFundingTime(nextTime)
@@ -102,7 +131,9 @@ export function useMarketWebSocket() {
 
                 // Time
                 const now = new Date(evtTimeMs || Date.now())
-                setLastUpdate(now.toLocaleTimeString('es-PE', { hour12: false }))
+                const timeStr = now.toLocaleTimeString('es-PE', { hour12: false })
+                setLastUpdate(timeStr)
+                saveState({ lastUpdate: timeStr })
 
                 // Price state (triggers flash via component)
                 setPrevPrice(p => {
@@ -117,17 +148,21 @@ export function useMarketWebSocket() {
                 const tickTime = new Date(evtTimeMs || Date.now())
                     .toLocaleTimeString('es-PE', { hour12: false })
                 const id = tickIdRef.current++
-                setTicks(prev => [
-                    {
-                        id,
-                        time: tickTime,
-                        price: newPrice,
-                        formattedPrice: formatPrice(newPrice),
-                        funding: funding ?? '0',
-                        fundingPct: (parseFloat(funding || 0) * 100).toFixed(4),
-                    },
-                    ...prev.slice(0, MAX_TICKS - 1),
-                ])
+                setTicks(prev => {
+                    const newTicks = [
+                        {
+                            id,
+                            time: tickTime,
+                            price: newPrice,
+                            formattedPrice: formatPrice(newPrice),
+                            funding: funding ?? '0',
+                            fundingPct: (parseFloat(funding || 0) * 100).toFixed(4),
+                        },
+                        ...prev.slice(0, MAX_TICKS - 1),
+                    ]
+                    saveState({ ticks: newTicks })
+                    return newTicks
+                })
             } catch (e) {
                 console.warn('[WS] Error parsing:', e)
             }
@@ -156,7 +191,11 @@ export function useMarketWebSocket() {
         }
     }, [connect])
 
-    const clearTicks = useCallback(() => setTicks([]), [])
+    const clearTicks = useCallback(() => {
+        setTicks([])
+        setTickCount(0)
+        saveState({ ticks: [] })
+    }, [])
 
     return {
         wsStatus,
