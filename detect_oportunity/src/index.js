@@ -10,7 +10,7 @@ try { process.loadEnvFile(); } catch { }
 const BINANCE_API_KEY = process.env.BINANCE_API_KEY;
 const BINANCE_API_SECRET = process.env.BINANCE_API_SECRET;
 
-const REST_BASE = process.env.BINANCE_REST_BASE || "https://demo-fapi.binance.com";
+const REST_BASE = process.env.BINANCE_REST_BASE || "https://fapi.binance.com";
 const RECV_WINDOW = Number(process.env.RECV_WINDOW ?? 5000);
 
 const WS_BASE =
@@ -47,6 +47,24 @@ async function signedRequest(method, path, params = {}) {
         throw new Error(`Binance HTTP ${res.status} ${res.statusText}: ${text}`);
     }
     return json;
+}
+
+async function placeConditionalAlgo({
+    symbol, side, orderType, triggerPrice, quantity, priceDec, qtyDec
+}) {
+    const params = {
+        algoType: "CONDITIONAL",
+        symbol,
+        side,
+        type: orderType, // "TAKE_PROFIT_MARKET" | "STOP_MARKET"
+        triggerPrice: fmt(triggerPrice, priceDec),
+        quantity: fmt(quantity, qtyDec),
+        reduceOnly: "true",
+        workingType: "CONTRACT_PRICE",
+        newOrderRespType: "RESULT",
+    };
+
+    return signedRequest("POST", "/fapi/v1/algoOrder", params);
 }
 
 async function publicRequest(path, params = {}) {
@@ -312,24 +330,24 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
     let slOrder = null;
 
     try {
-        tpOrder = await signedRequest("POST", "/fapi/v1/order", {
+        tpOrder = await placeConditionalAlgo({
             symbol: SYMBOL_DB,
             side: closeSide,
-            type: "TAKE_PROFIT_MARKET",
-            stopPrice: fmt(tpPrice, priceDec),
-            reduceOnly: "true",
-            quantity: fmt(qtyAdj, qtyDec),
-            workingType: "CONTRACT_PRICE",
+            orderType: "TAKE_PROFIT_MARKET",
+            triggerPrice: tpPrice,
+            quantity: qtyAdj,
+            priceDec,
+            qtyDec,
         });
 
-        slOrder = await signedRequest("POST", "/fapi/v1/order", {
+        slOrder = await placeConditionalAlgo({
             symbol: SYMBOL_DB,
             side: closeSide,
-            type: "STOP_MARKET",
-            stopPrice: fmt(slPrice, priceDec),
-            reduceOnly: "true",
-            quantity: fmt(qtyAdj, qtyDec),
-            workingType: "CONTRACT_PRICE",
+            orderType: "STOP_MARKET",
+            triggerPrice: slPrice,
+            quantity: qtyAdj,
+            priceDec,
+            qtyDec,
         });
     } catch (e) {
         console.error("❌ TP/SL failed, emergency close:", e.message);
@@ -396,8 +414,8 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
         qty: qtyAdj,
         meta: row.meta,
         pivot_base_day_used,
-        tpOrderId: tpOrder?.orderId,
-        slOrderId: slOrder?.orderId,
+        tpAlgoId: tpOrder?.algoId,
+        slAlgoId: slOrder?.algoId,
     });
 
     // lock por nivel (tu regla)
@@ -409,8 +427,8 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
     console.log("✅ REAL TRADE OPENED", {
         id: data.id, side, level, entryPrice,
         tpPrice, slPrice, qty: qtyAdj,
-        tpOrderId: tpOrder?.orderId,
-        slOrderId: slOrder?.orderId,
+        tpAlgoId: tpOrder?.algoId,
+        slAlgoId: slOrder?.algoId,
         lockedLevelKey,
     });
 
@@ -427,9 +445,29 @@ async function cancelOrderSafe(orderId) {
     } catch { /* ignore */ }
 }
 
+async function cancelAlgoSafe(algoId) {
+    if (!algoId) return;
+    try {
+        await signedRequest("DELETE", "/fapi/v1/algoOrder", { algoId: String(algoId) });
+    } catch { /* ignore */ }
+}
+
 async function getOrderStatus(orderId) {
     if (!orderId) return null;
     return signedRequest("GET", "/fapi/v1/order", { symbol: SYMBOL_DB, orderId: String(orderId) });
+}
+
+async function getAlgoStatus(algoId) {
+    return signedRequest("GET", "/fapi/v1/algoOrder", { algoId: String(algoId) });
+}
+
+function pickAlgoObj(resp) {
+    if (!resp) return null;
+    if (Array.isArray(resp)) return resp[0] ?? null;
+    if (Array.isArray(resp?.data)) return resp.data[0] ?? null;
+    if (Array.isArray(resp?.rows)) return resp.rows[0] ?? null;
+    if (Array.isArray(resp?.algoOrders)) return resp.algoOrders[0] ?? null;
+    return resp;
 }
 
 async function reconcileOpenTrades() {
@@ -438,21 +476,37 @@ async function reconcileOpenTrades() {
 
     for (const [id, t] of openTrades.entries()) {
         try {
-            const tp = await getOrderStatus(t.tpOrderId);
-            const sl = await getOrderStatus(t.slOrderId);
+            // 1) Consultar ALGOs (no /order)
+            const tpAlgoRaw = t.tpAlgoId ? await getAlgoStatus(t.tpAlgoId) : null;
+            const slAlgoRaw = t.slAlgoId ? await getAlgoStatus(t.slAlgoId) : null;
 
-            const tpFilled = tp?.status === "FILLED";
-            const slFilled = sl?.status === "FILLED";
+            const tpAlgo = pickAlgoObj(tpAlgoRaw);
+            const slAlgo = pickAlgoObj(slAlgoRaw);
 
-            if (!tpFilled && !slFilled) continue;
+            // 2) Ver si alguno ya generó una orden real (orderId)
+            const tpOrderId = tpAlgo?.orderId || tpAlgo?.actualOrderId || tpAlgo?.triggeredOrderId;
+            const slOrderId = slAlgo?.orderId || slAlgo?.actualOrderId || slAlgo?.triggeredOrderId;
 
-            const reason = tpFilled ? "TP" : "SL";
-            const filledOrder = tpFilled ? tp : sl;
+            // Si ninguno se activó, no hay nada que reconciliar
+            if (!tpOrderId && !slOrderId) continue;
 
-            // best-effort exitPrice (a veces avgPrice viene "0")
-            let exitPrice = Number(filledOrder?.avgPrice);
+            const reason = tpOrderId ? "TP" : "SL";
+            const triggeredOrderId = tpOrderId ? tpOrderId : slOrderId;
+
+            // 3) Consultar la ORDEN REAL ya creada por el algo
+            const real = await getOrderStatus(triggeredOrderId);
+            if (real?.status !== "FILLED") continue;
+
+            // 4) Cancelar el ALGO opuesto (no /order)
+            if (reason === "TP") await cancelAlgoSafe(t.slAlgoId);
+            if (reason === "SL") await cancelAlgoSafe(t.tpAlgoId);
+
+            // 5) Calcular salida/PnL
+            let exitPrice = Number(real?.avgPrice);
             if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
-                exitPrice = t.side === "LONG" ? (lastBid ?? t.tpPrice ?? t.entryPrice) : (lastAsk ?? t.tpPrice ?? t.entryPrice);
+                exitPrice = t.side === "LONG"
+                    ? (lastBid ?? t.tpPrice ?? t.entryPrice)
+                    : (lastAsk ?? t.tpPrice ?? t.entryPrice);
             }
 
             const exitTs = new Date().toISOString();
@@ -460,11 +514,7 @@ async function reconcileOpenTrades() {
                 ? (exitPrice - t.entryPrice) * t.qty
                 : (t.entryPrice - exitPrice) * t.qty;
 
-            // cancelar la orden opuesta si quedó viva
-            if (tpFilled) await cancelOrderSafe(t.slOrderId);
-            if (slFilled) await cancelOrderSafe(t.tpOrderId);
-
-            // update Supabase
+            // 6) Update Supabase
             const patch = {
                 status: "CLOSED",
                 exit_ts: exitTs,
@@ -481,9 +531,11 @@ async function reconcileOpenTrades() {
                     exit_bid: lastBid,
                     exit_ask: lastAsk,
                     pnl_usdt: pnl,
-                    binance_exit_order: filledOrder,
-                    binance_exit_order_id: filledOrder?.orderId,
-                    binance_exit_update_time: filledOrder?.updateTime,
+                    binance_exit_order: real,
+                    binance_exit_order_id: real?.orderId,
+                    binance_exit_update_time: real?.updateTime,
+                    binance_tp_algo: tpAlgo,
+                    binance_sl_algo: slAlgo,
                 },
             };
 
@@ -495,7 +547,7 @@ async function reconcileOpenTrades() {
 
             openTrades.delete(id);
 
-            console.log("🔴 TRADE CLOSED (reconciled)", {
+            console.log("🔴 TRADE CLOSED (algo reconciled)", {
                 id,
                 reason,
                 side: t.side,
@@ -536,8 +588,8 @@ async function restoreOpenTrades() {
             qty: Number(r.meta?.qty_btc ?? QTY_BTC),
             meta: r.meta || {},
             pivot_base_day_used: r.pivot_base_day,
-            tpOrderId: r.meta?.binance_tp_order?.orderId,
-            slOrderId: r.meta?.binance_sl_order?.orderId,
+            tpAlgoId: r.meta?.binance_tp_order?.algoId,
+            slAlgoId: r.meta?.binance_sl_order?.algoId,
         });
     }
 
