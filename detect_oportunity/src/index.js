@@ -295,7 +295,6 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
         const nowMs = Date.now();
         const last = lastSignalAt.get(cdKey) || 0;
         if (nowMs - last < COOLDOWN_MS) return null;
-        lastSignalAt.set(cdKey, nowMs);
 
         if (!canOpenNewTrade()) return null;
         if (!pivot_base_day_used) return null;
@@ -431,6 +430,8 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             console.error("❌ Supabase insert failed:", error.message);
             return null;
         }
+
+        lastSignalAt.set(cdKey, nowMs);
 
         openTrades.set(data.id, {
             id: data.id,
@@ -713,7 +714,7 @@ async function processQuote({ bid, ask }) {
                 detectorConfirm.set(k, next);
 
                 if (next >= CONFIRM_TICKS) {
-                    await openTradeReal({
+                    const openedId = await openTradeReal({
                         side: "LONG",
                         level: item.level,
                         levelPrice,
@@ -723,9 +724,11 @@ async function processQuote({ bid, ask }) {
                         pivot_base_day_used: item.baseDay,
                     });
 
-                    detectorTouched.set(k, false);
-                    detectorConfirm.set(k, 0);
-                    detectorTouchSide.delete(k);
+                    if (openedId) {
+                        detectorTouched.set(k, false);
+                        detectorConfirm.set(k, 0);
+                        detectorTouchSide.delete(k);
+                    }
                 }
             }
 
@@ -738,7 +741,7 @@ async function processQuote({ bid, ask }) {
                 detectorConfirm.set(k, next);
 
                 if (Math.abs(next) >= CONFIRM_TICKS) {
-                    await openTradeReal({
+                    const openedId = await openTradeReal({
                         side: "SHORT",
                         level: item.level,
                         levelPrice,
@@ -748,9 +751,11 @@ async function processQuote({ bid, ask }) {
                         pivot_base_day_used: item.baseDay,
                     });
 
-                    detectorTouched.set(k, false);
-                    detectorConfirm.set(k, 0);
-                    detectorTouchSide.delete(k);
+                    if (openedId) {
+                        detectorTouched.set(k, false);
+                        detectorConfirm.set(k, 0);
+                        detectorTouchSide.delete(k);
+                    }
                 }
             }
 

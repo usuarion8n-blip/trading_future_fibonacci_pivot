@@ -15,6 +15,7 @@ const TIMEFRAMES = [
     { label: '5m', seconds: 300 },
     { label: '15m', seconds: 900 },
     { label: '1h', seconds: 3600 },
+    { label: '1d', seconds: 86400 },
 ]
 
 const MAX_CANDLES = 500
@@ -26,6 +27,7 @@ const TF_TO_INTERVAL = {
     300: '5m',
     900: '15m',
     3600: '1h',
+    86400: '1d',
 }
 
 /** Devuelve la clave de candles para un timeframe específico */
