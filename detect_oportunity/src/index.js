@@ -239,6 +239,23 @@ function bpsDistance(price, levelPrice) {
 // ======================
 const openTrades = new Map(); // id -> state
 let lockedLevelKey = null; // `${baseDay}:${level}`
+let openingTrade = false; // evita dobles entradas mientras una apertura está en curso
+
+function updateLockedLevel(baseDay, level) {
+    const nextKey = levelKey(baseDay, level);
+    const prevKey = lockedLevelKey;
+
+    // solo cambia si realmente es otro nivel
+    if (prevKey !== nextKey) {
+        lockedLevelKey = nextKey;
+        console.log("🔒 Locked level changed:", {
+            previous: prevKey,
+            current: lockedLevelKey,
+        });
+    } else {
+        console.log("🔒 Locked level remains:", lockedLevelKey);
+    }
+}
 
 function levelKey(baseDay, level) {
     return `${baseDay}:${level}`;
@@ -253,6 +270,7 @@ const lastSignalAt = new Map(); // cooldown key -> ts
 // detector per (baseDay:level)
 const detectorTouched = new Map();
 const detectorConfirm = new Map();
+const detectorTouchSide = new Map(); // ABOVE | BELOW
 function detKey(baseDay, level) {
     return `${baseDay}:${level}`;
 }
@@ -265,174 +283,197 @@ let lastAsk = null;
 // REAL OPEN + TP/SL
 // ======================
 async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot_base_day_used }) {
-    const cdKey = `${pivot_base_day_used}:${level}:${side}`;
-    const nowMs = Date.now();
-    const last = lastSignalAt.get(cdKey) || 0;
-    if (nowMs - last < COOLDOWN_MS) return null;
-    lastSignalAt.set(cdKey, nowMs);
-
-    if (!canOpenNewTrade()) return null;
-    if (!pivot_base_day_used) return null;
-
-    // qty ajustada a stepSize
-    const qtyRaw = QTY_BTC;
-    const qtyDec = decimalsFromStep(STEP_SIZE_STR);
-    const qtyAdj = Number(fmt(floorToStep(qtyRaw, STEP_SIZE), qtyDec));
-    if (qtyAdj < MIN_QTY) {
-        console.log("⛔ qty < minQty, skip", { qtyRaw, qtyAdj, minQty: MIN_QTY });
+    if (openingTrade) {
+        console.log("⏳ openTradeReal skipped: ya hay una apertura en curso");
         return null;
     }
 
-    const entrySide = side === "LONG" ? "BUY" : "SELL";
-    const closeSide = side === "LONG" ? "SELL" : "BUY";
-
-    // Entry MARKET
-    if (DRY_RUN) {
-        console.log("🧪 DRY_RUN openTradeReal", { side, level, qtyAdj });
-        return null;
-    }
-
-    let entryOrder;
-    try {
-        entryOrder = await signedRequest("POST", "/fapi/v1/order", {
-            symbol: SYMBOL_DB,
-            side: entrySide,
-            type: "MARKET",
-            quantity: fmt(qtyAdj, qtyDec),
-            newOrderRespType: "RESULT",
-        });
-    } catch (e) {
-        console.error("❌ Entry order failed:", e.message);
-        return null;
-    }
-
-    // entryPrice (si avgPrice viene 0, fallback a ask/bid)
-    let entryPrice = Number(entryOrder?.avgPrice);
-    if (!Number.isFinite(entryPrice) || entryPrice <= 0) entryPrice = Number(side === "LONG" ? ask : bid);
-
-    const entryTs = new Date().toISOString();
-
-    // TP/SL por %
-    const tpDelta = entryPrice * TP_PCT;
-    const slDelta = entryPrice * SL_PCT;
-
-    let tpPrice = side === "LONG" ? entryPrice + tpDelta : entryPrice - tpDelta;
-    let slPrice = side === "LONG" ? entryPrice - slDelta : entryPrice + slDelta;
-
-    // redondeo a tickSize
-    tpPrice = roundToTick(tpPrice, TICK_SIZE);
-    slPrice = roundToTick(slPrice, TICK_SIZE);
-
-    const priceDec = decimalsFromStep(TICK_SIZE_STR);
-
-    // Colocar TP/SL (si falla, cerrar posición inmediatamente)
-    let tpOrder = null;
-    let slOrder = null;
+    openingTrade = true;
 
     try {
-        tpOrder = await placeConditionalAlgo({
-            symbol: SYMBOL_DB,
-            side: closeSide,
-            orderType: "TAKE_PROFIT_MARKET",
-            triggerPrice: tpPrice,
-            quantity: qtyAdj,
-            priceDec,
-            qtyDec,
-        });
+        const cdKey = `${pivot_base_day_used}:${level}:${side}`;
+        const nowMs = Date.now();
+        const last = lastSignalAt.get(cdKey) || 0;
+        if (nowMs - last < COOLDOWN_MS) return null;
+        lastSignalAt.set(cdKey, nowMs);
 
-        slOrder = await placeConditionalAlgo({
-            symbol: SYMBOL_DB,
-            side: closeSide,
-            orderType: "STOP_MARKET",
-            triggerPrice: slPrice,
-            quantity: qtyAdj,
-            priceDec,
-            qtyDec,
-        });
-    } catch (e) {
-        console.error("❌ TP/SL failed, emergency close:", e.message);
+        if (!canOpenNewTrade()) return null;
+        if (!pivot_base_day_used) return null;
 
-        // intento cerrar inmediatamente para no quedar sin SL
+        // qty ajustada a stepSize
+        const qtyRaw = QTY_BTC;
+        const qtyDec = decimalsFromStep(STEP_SIZE_STR);
+        const qtyAdj = Number(fmt(floorToStep(qtyRaw, STEP_SIZE), qtyDec));
+        if (qtyAdj < MIN_QTY) {
+            console.log("⛔ qty < minQty, skip", { qtyRaw, qtyAdj, minQty: MIN_QTY });
+            return null;
+        }
+
+        const entrySide = side === "LONG" ? "BUY" : "SELL";
+        const closeSide = side === "LONG" ? "SELL" : "BUY";
+
+        // Entry MARKET
+        if (DRY_RUN) {
+            console.log("🧪 DRY_RUN openTradeReal", { side, level, qtyAdj });
+            return null;
+        }
+
+        let entryOrder;
         try {
-            await signedRequest("POST", "/fapi/v1/order", {
+            entryOrder = await signedRequest("POST", "/fapi/v1/order", {
                 symbol: SYMBOL_DB,
-                side: closeSide,
+                side: entrySide,
                 type: "MARKET",
-                reduceOnly: "true",
                 quantity: fmt(qtyAdj, qtyDec),
                 newOrderRespType: "RESULT",
             });
-            console.error("🧯 Emergency close sent.");
-        } catch (e2) {
-            console.error("🧨 Emergency close FAILED:", e2.message);
+        } catch (e) {
+            console.error("❌ Entry order failed:", e.message);
+            return null;
         }
-        return null;
+
+        // entryPrice (si avgPrice viene 0, fallback a ask/bid)
+        let entryPrice = Number(entryOrder?.avgPrice);
+        if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+            entryPrice = Number(side === "LONG" ? ask : bid);
+        }
+
+        const entryTs = new Date().toISOString();
+
+        // TP/SL por %
+        const tpDelta = entryPrice * TP_PCT;
+        const slDelta = entryPrice * SL_PCT;
+
+        let tpPrice = side === "LONG" ? entryPrice + tpDelta : entryPrice - tpDelta;
+        let slPrice = side === "LONG" ? entryPrice - slDelta : entryPrice + slDelta;
+
+        // redondeo a tickSize
+        tpPrice = roundToTick(tpPrice, TICK_SIZE);
+        slPrice = roundToTick(slPrice, TICK_SIZE);
+
+        const priceDec = decimalsFromStep(TICK_SIZE_STR);
+
+        // Colocar TP/SL (si falla, cerrar posición inmediatamente)
+        let tpOrder = null;
+        let slOrder = null;
+
+        try {
+            tpOrder = await placeConditionalAlgo({
+                symbol: SYMBOL_DB,
+                side: closeSide,
+                orderType: "TAKE_PROFIT_MARKET",
+                triggerPrice: tpPrice,
+                quantity: qtyAdj,
+                priceDec,
+                qtyDec,
+            });
+
+            slOrder = await placeConditionalAlgo({
+                symbol: SYMBOL_DB,
+                side: closeSide,
+                orderType: "STOP_MARKET",
+                triggerPrice: slPrice,
+                quantity: qtyAdj,
+                priceDec,
+                qtyDec,
+            });
+        } catch (e) {
+            console.error("❌ TP/SL failed, emergency close:", e.message);
+
+            // intento cerrar inmediatamente para no quedar sin SL
+            try {
+                await signedRequest("POST", "/fapi/v1/order", {
+                    symbol: SYMBOL_DB,
+                    side: closeSide,
+                    type: "MARKET",
+                    reduceOnly: "true",
+                    quantity: fmt(qtyAdj, qtyDec),
+                    newOrderRespType: "RESULT",
+                });
+                console.error("🧯 Emergency close sent.");
+            } catch (e2) {
+                console.error("🧨 Emergency close FAILED:", e2.message);
+            }
+            return null;
+        }
+
+        // Guardar en Supabase
+        const row = {
+            symbol: SYMBOL_DB,
+            interval: INTERVAL,
+            pivot_base_day: pivot_base_day_used,
+            level,
+            side,
+            entry_ts: entryTs,
+            entry_price: entryPrice,
+            entry_bid: bid,
+            entry_ask: ask,
+            tp_price: tpPrice,
+            sl_price: slPrice,
+            status: "OPEN",
+            meta: {
+                source: "bookTicker",
+                pivot_price: levelPrice,
+                distance_bps_at_signal: Number(distBps.toFixed(2)),
+                tp_pct: TP_PCT,
+                sl_pct: SL_PCT,
+                qty_btc: qtyAdj,
+                tp_algo_id: tpOrder?.algoId ?? null,
+                sl_algo_id: slOrder?.algoId ?? null,
+                binance_entry_order: entryOrder,
+                binance_tp_order: tpOrder,
+                binance_sl_order: slOrder,
+            },
+        };
+
+        const { data, error } = await supabase.from(TRADES_TABLE).insert(row).select().single();
+        if (error) {
+            console.error("❌ Supabase insert failed:", error.message);
+            return null;
+        }
+
+        openTrades.set(data.id, {
+            id: data.id,
+            side,
+            level,
+            entryPrice,
+            tpPrice,
+            slPrice,
+            entryTs,
+            qty: qtyAdj,
+            meta: row.meta,
+            pivot_base_day_used,
+            tpAlgoId: tpOrder?.algoId,
+            slAlgoId: slOrder?.algoId,
+        });
+
+        // lock por nivel:
+        // este nivel queda bloqueado hasta que otra oportunidad válida
+        // se detecte en otro soporte/resistencia
+        updateLockedLevel(pivot_base_day_used, level);
+
+        // limpiar detectores para reiniciar el escaneo
+        detectorTouched.clear();
+        detectorConfirm.clear();
+        detectorTouchSide.clear();
+
+        console.log("✅ REAL TRADE OPENED", {
+            id: data.id,
+            side,
+            level,
+            entryPrice,
+            tpPrice,
+            slPrice,
+            qty: qtyAdj,
+            tpAlgoId: tpOrder?.algoId,
+            slAlgoId: slOrder?.algoId,
+            lockedLevelKey,
+        });
+
+        return data.id;
+    } finally {
+        openingTrade = false;
     }
-
-    // Guardar en Supabase
-    const row = {
-        symbol: SYMBOL_DB,
-        interval: INTERVAL,
-        pivot_base_day: pivot_base_day_used,
-        level,
-        side,
-        entry_ts: entryTs,
-        entry_price: entryPrice,
-        entry_bid: bid,
-        entry_ask: ask,
-        tp_price: tpPrice,
-        sl_price: slPrice,
-        status: "OPEN",
-        meta: {
-            source: "bookTicker",
-            pivot_price: levelPrice,
-            distance_bps_at_signal: Number(distBps.toFixed(2)),
-            tp_pct: TP_PCT,
-            sl_pct: SL_PCT,
-            qty_btc: qtyAdj,
-            // ids Binance (guardamos el objeto completo por trazabilidad)
-            binance_entry_order: entryOrder,
-            binance_tp_order: tpOrder,
-            binance_sl_order: slOrder,
-        },
-    };
-
-    const { data, error } = await supabase.from(TRADES_TABLE).insert(row).select().single();
-    if (error) {
-        console.error("❌ Supabase insert failed:", error.message);
-        return null;
-    }
-
-    openTrades.set(data.id, {
-        id: data.id,
-        side,
-        level,
-        entryPrice,
-        tpPrice,
-        slPrice,
-        entryTs,
-        qty: qtyAdj,
-        meta: row.meta,
-        pivot_base_day_used,
-        tpAlgoId: tpOrder?.algoId,
-        slAlgoId: slOrder?.algoId,
-    });
-
-    // lock por nivel (tu regla)
-    lockedLevelKey = levelKey(pivot_base_day_used, level);
-    const dk = detKey(pivot_base_day_used, level);
-    detectorTouched.set(dk, false);
-    detectorConfirm.set(dk, 0);
-
-    console.log("✅ REAL TRADE OPENED", {
-        id: data.id, side, level, entryPrice,
-        tpPrice, slPrice, qty: qtyAdj,
-        tpAlgoId: tpOrder?.algoId,
-        slAlgoId: slOrder?.algoId,
-        lockedLevelKey,
-    });
-
-    return data.id;
 }
 
 // ======================
@@ -463,10 +504,17 @@ async function getAlgoStatus(algoId) {
 
 function pickAlgoObj(resp) {
     if (!resp) return null;
+
     if (Array.isArray(resp)) return resp[0] ?? null;
     if (Array.isArray(resp?.data)) return resp.data[0] ?? null;
     if (Array.isArray(resp?.rows)) return resp.rows[0] ?? null;
     if (Array.isArray(resp?.algoOrders)) return resp.algoOrders[0] ?? null;
+    if (Array.isArray(resp?.list)) return resp.list[0] ?? null;
+
+    if (resp?.data && typeof resp.data === "object" && !Array.isArray(resp.data)) {
+        return resp.data;
+    }
+
     return resp;
 }
 
@@ -554,6 +602,7 @@ async function reconcileOpenTrades() {
                 entry: t.entryPrice,
                 exit: exitPrice,
                 pnl_usdt: Number(pnl.toFixed(6)),
+                lockedLevelKey,
             });
 
         } catch (e) {
@@ -588,8 +637,17 @@ async function restoreOpenTrades() {
             qty: Number(r.meta?.qty_btc ?? QTY_BTC),
             meta: r.meta || {},
             pivot_base_day_used: r.pivot_base_day,
-            tpAlgoId: r.meta?.binance_tp_order?.algoId,
-            slAlgoId: r.meta?.binance_sl_order?.algoId,
+            tpAlgoId:
+                r.meta?.tp_algo_id ??
+                r.meta?.binance_tp_order?.algoId ??
+                r.meta?.binance_tp_order?.id ??
+                null,
+
+            slAlgoId:
+                r.meta?.sl_algo_id ??
+                r.meta?.binance_sl_order?.algoId ??
+                r.meta?.binance_sl_order?.id ??
+                null,
         });
     }
 
@@ -611,46 +669,47 @@ async function restoreOpenTrades() {
 async function processQuote({ bid, ask }) {
     if (!pivotsList.length) return;
 
-    // niveles de 2 días (incluye S1,S2,S3 y R1,R2,R3)
     const levelsToWatch = [];
     for (const p of pivotsList) {
         levelsToWatch.push(
-            { baseDay: p.baseDay, level: "S1", side: "LONG", price: p.levels.S1 },
-            { baseDay: p.baseDay, level: "S2", side: "LONG", price: p.levels.S2 },
-            { baseDay: p.baseDay, level: "S3", side: "LONG", price: p.levels.S3 }, // ✅ nuevo
-            { baseDay: p.baseDay, level: "R1", side: "SHORT", price: p.levels.R1 },
-            { baseDay: p.baseDay, level: "R2", side: "SHORT", price: p.levels.R2 },
-            { baseDay: p.baseDay, level: "R3", side: "SHORT", price: p.levels.R3 }, // ✅ nuevo
+            { baseDay: p.baseDay, level: "S1", price: p.levels.S1 },
+            { baseDay: p.baseDay, level: "S2", price: p.levels.S2 },
+            { baseDay: p.baseDay, level: "S3", price: p.levels.S3 },
+            { baseDay: p.baseDay, level: "R1", price: p.levels.R1 },
+            { baseDay: p.baseDay, level: "R2", price: p.levels.R2 },
+            { baseDay: p.baseDay, level: "R3", price: p.levels.R3 },
         );
     }
+
+    const midPrice = (bid + ask) / 2;
 
     for (const item of levelsToWatch) {
         const lvlKey = levelKey(item.baseDay, item.level);
         if (lockedLevelKey === lvlKey) continue;
 
         const levelPrice = item.price;
-
-        // LONG mide ASK, SHORT mide BID
-        const refPrice = item.side === "LONG" ? ask : bid;
-
-        const distBps = bpsDistance(refPrice, levelPrice);
+        const distBps = bpsDistance(midPrice, levelPrice);
         const absBps = Math.abs(distBps);
-
         const k = detKey(item.baseDay, item.level);
 
-        // 1) touch
+        // TOUCH
         if (!detectorTouched.get(k) && absBps <= TOUCH_BUFFER_BPS) {
             detectorTouched.set(k, true);
             detectorConfirm.set(k, 0);
+            detectorTouchSide.set(k, distBps >= 0 ? "ABOVE" : "BELOW");
             continue;
         }
 
-        // 2) confirm rebote
         if (detectorTouched.get(k)) {
             const prev = detectorConfirm.get(k) || 0;
+            const touchSide = detectorTouchSide.get(k);
 
-            if (item.side === "LONG") {
-                const next = distBps >= REBOUND_BPS ? (prev + 1) : 0;
+            // =========================
+            // REBOTE ALCISTA
+            // Llegó desde arriba, tocó, y vuelve a quedar arriba
+            // =========================
+            if (touchSide === "ABOVE" && distBps >= REBOUND_BPS) {
+                const next = prev >= 0 ? prev + 1 : 1;
                 detectorConfirm.set(k, next);
 
                 if (next >= CONFIRM_TICKS) {
@@ -659,34 +718,64 @@ async function processQuote({ bid, ask }) {
                         level: item.level,
                         levelPrice,
                         distBps,
-                        bid, ask,
+                        bid,
+                        ask,
                         pivot_base_day_used: item.baseDay,
                     });
+
                     detectorTouched.set(k, false);
                     detectorConfirm.set(k, 0);
+                    detectorTouchSide.delete(k);
                 }
-            } else {
-                const next = distBps <= -REBOUND_BPS ? (prev + 1) : 0;
+            }
+
+            // =========================
+            // REBOTE BAJISTA
+            // Llegó desde abajo, tocó, y vuelve a quedar abajo
+            // =========================
+            else if (touchSide === "BELOW" && distBps <= -REBOUND_BPS) {
+                const next = prev <= 0 ? prev - 1 : -1;
                 detectorConfirm.set(k, next);
 
-                if (next >= CONFIRM_TICKS) {
+                if (Math.abs(next) >= CONFIRM_TICKS) {
                     await openTradeReal({
                         side: "SHORT",
                         level: item.level,
                         levelPrice,
                         distBps,
-                        bid, ask,
+                        bid,
+                        ask,
                         pivot_base_day_used: item.baseDay,
                     });
+
                     detectorTouched.set(k, false);
                     detectorConfirm.set(k, 0);
+                    detectorTouchSide.delete(k);
                 }
             }
 
-            // reset por invalidez
+            // =========================
+            // Si cruzó al lado contrario, eso parece más ruptura
+            // que rebote. Aquí lo invalidamos.
+            // =========================
+            else if (
+                (touchSide === "ABOVE" && distBps <= -REBOUND_BPS) ||
+                (touchSide === "BELOW" && distBps >= REBOUND_BPS)
+            ) {
+                detectorTouched.set(k, false);
+                detectorConfirm.set(k, 0);
+                detectorTouchSide.delete(k);
+            }
+
+            else {
+                detectorConfirm.set(k, 0);
+            }
+
+            // invalidación por alejarse demasiado sin estructura clara
             if (absBps > 50) {
                 detectorTouched.set(k, false);
                 detectorConfirm.set(k, 0);
+                detectorTouchSide.delete(k);
             }
         }
     }
@@ -700,19 +789,21 @@ function printLevels({ bid, ask }) {
     lastPrintTs = now;
 
     const ts = new Date().toISOString();
-    console.log(`${ts} DRY_RUN=${DRY_RUN ? 1 : 0} BID=${bid} ASK=${ask} openTrades=${openTrades.size} locked=${lockedLevelKey || "-"}`);
+    const mid = (bid + ask) / 2;
+
+    console.log(`${ts} DRY_RUN=${DRY_RUN ? 1 : 0} BID=${bid} ASK=${ask} MID=${mid} openTrades=${openTrades.size} openingTrade=${openingTrade ? 1 : 0} locked=${lockedLevelKey || "-"}`);
 
     for (const p of pivotsList) {
         const { S1, S2, S3, R1, R2, R3 } = p.levels;
 
         console.log(
             `baseDay=${p.baseDay}` +
-            ` S3=${S3} askS3bps=${bpsDistance(ask, S3).toFixed(2)}` +
-            ` S2=${S2} askS2bps=${bpsDistance(ask, S2).toFixed(2)}` +
-            ` S1=${S1} askS1bps=${bpsDistance(ask, S1).toFixed(2)}` +
-            ` R1=${R1} bidR1bps=${bpsDistance(bid, R1).toFixed(2)}` +
-            ` R2=${R2} bidR2bps=${bpsDistance(bid, R2).toFixed(2)}` +
-            ` R3=${R3} bidR3bps=${bpsDistance(bid, R3).toFixed(2)}`
+            ` S3=${S3} midS3bps=${bpsDistance(mid, S3).toFixed(2)}` +
+            ` S2=${S2} midS2bps=${bpsDistance(mid, S2).toFixed(2)}` +
+            ` S1=${S1} midS1bps=${bpsDistance(mid, S1).toFixed(2)}` +
+            ` R1=${R1} midR1bps=${bpsDistance(mid, R1).toFixed(2)}` +
+            ` R2=${R2} midR2bps=${bpsDistance(mid, R2).toFixed(2)}` +
+            ` R3=${R3} midR3bps=${bpsDistance(mid, R3).toFixed(2)}`
         );
     }
 }

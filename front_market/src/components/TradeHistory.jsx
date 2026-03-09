@@ -57,6 +57,7 @@ const COLUMNS = [
     { key: 'interval', label: 'TF', render: r => <span className="th-mono th-muted">{r.interval}</span> },
     { key: 'level', label: 'Nivel', render: r => <span className="th-level">{r.level}</span> },
     { key: 'side', label: 'Lado', render: r => <SideBadge side={r.side} /> },
+    { key: 'qty', label: 'Cant.', render: r => <span className="th-mono">{r.meta?.qty_btc ?? '—'}</span> },
     { key: 'status', label: 'Estado', render: r => <StatusBadge status={r.status} /> },
     { key: 'entry_price', label: 'Precio entrada', render: r => <span className="th-mono">{fmtPrice(r.entry_price)}</span> },
     { key: 'tp_price', label: 'TP', render: r => <span className="th-mono th-tp">{fmtPrice(r.tp_price)}</span> },
