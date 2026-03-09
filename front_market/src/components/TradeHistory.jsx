@@ -117,6 +117,7 @@ export default function TradeHistory({ onBack }) {
     const [hasMore, setHasMore] = useState(true)
     const [total, setTotal] = useState(null)
     const [filter, setFilter] = useState('ALL')
+    const [dateFilter, setDateFilter] = useState('ALL')
     const [statuses, setStatuses] = useState([])   // dynamic from DB
 
     // Fetch distinct status values once on mount
@@ -131,7 +132,7 @@ export default function TradeHistory({ onBack }) {
             })
     }, [])
 
-    const fetchTrades = useCallback(async (pageIndex, statusFilter) => {
+    const fetchTrades = useCallback(async (pageIndex, statusFilter, dFilter) => {
         setLoading(true)
         setError(null)
 
@@ -148,6 +149,15 @@ export default function TradeHistory({ onBack }) {
             query = query.eq('status', statusFilter)
         }
 
+        if (dFilter !== 'ALL') {
+            const now = new Date()
+            if (dFilter === 'HOY') now.setHours(0, 0, 0, 0)
+            else if (dFilter === '1S') now.setDate(now.getDate() - 7)
+            else if (dFilter === '1M') now.setMonth(now.getMonth() - 1)
+            else if (dFilter === '1A') now.setFullYear(now.getFullYear() - 1)
+            query = query.gte('entry_ts', now.toISOString())
+        }
+
         const { data, error: err, count } = await query
 
         setLoading(false)
@@ -157,14 +167,20 @@ export default function TradeHistory({ onBack }) {
         setHasMore((data ?? []).length === PAGE_SIZE)
     }, [])
 
-    useEffect(() => { fetchTrades(page, filter) }, [fetchTrades, page, filter])
+    useEffect(() => { fetchTrades(page, filter, dateFilter) }, [fetchTrades, page, filter, dateFilter])
 
     const handleFilter = (f) => {
         setPage(0)
         setFilter(f)
     }
 
+    const handleDateFilter = (f) => {
+        setPage(0)
+        setDateFilter(f)
+    }
+
     const FILTERS = statuses.length ? statuses : ['ALL']
+    const DATE_FILTERS = ['ALL', 'HOY', '1S', '1M', '1A']
 
     return (
         <div className="th-page">
@@ -188,35 +204,53 @@ export default function TradeHistory({ onBack }) {
                     )}
                 </div>
 
-                <div className="th-header-right">
-                    {/* Status filter buttons */}
-                    <div className="th-filters">
-                        {FILTERS.map(f => (
-                            <button
-                                key={f}
-                                className={`th-filter-btn ${filter === f ? 'th-filter-btn--active' : ''}`}
-                                onClick={() => handleFilter(f)}
-                            >
-                                {f}
-                            </button>
-                        ))}
+                <div className="th-header-right" style={{ flexDirection: 'column', alignItems: 'flex-end', gap: '8px' }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span className="th-muted th-mono" style={{ fontSize: '0.8rem' }}>FECHA:</span>
+                        <div className="th-filters">
+                            {DATE_FILTERS.map(f => (
+                                <button
+                                    key={f}
+                                    className={`th-filter-btn ${dateFilter === f ? 'th-filter-btn--active' : ''}`}
+                                    onClick={() => handleDateFilter(f)}
+                                >
+                                    {f}
+                                </button>
+                            ))}
+                        </div>
                     </div>
 
-                    <button
-                        className="th-refresh-btn"
-                        onClick={() => fetchTrades(page, filter)}
-                        disabled={loading}
-                    >
-                        <svg
-                            width="14" height="14" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
-                            className={loading ? 'th-spin' : ''}
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span className="th-muted th-mono" style={{ fontSize: '0.8rem' }}>ESTADO:</span>
+                        {/* Status filter buttons */}
+                        <div className="th-filters">
+                            {FILTERS.map(f => (
+                                <button
+                                    key={f}
+                                    className={`th-filter-btn ${filter === f ? 'th-filter-btn--active' : ''}`}
+                                    onClick={() => handleFilter(f)}
+                                >
+                                    {f}
+                                </button>
+                            ))}
+                        </div>
+
+                        <button
+                            className="th-refresh-btn"
+                            onClick={() => fetchTrades(page, filter, dateFilter)}
+                            disabled={loading}
                         >
-                            <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
-                            <path d="M3.51 9a9 9 0 0114.14-3.36L23 10M1 14l5.35 4.36A9 9 0 0020.49 15" />
-                        </svg>
-                        {loading ? 'Cargando…' : 'Actualizar'}
-                    </button>
+                            <svg
+                                width="14" height="14" viewBox="0 0 24 24" fill="none"
+                                stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"
+                                className={loading ? 'th-spin' : ''}
+                            >
+                                <path d="M23 4v6h-6" /><path d="M1 20v-6h6" />
+                                <path d="M3.51 9a9 9 0 0114.14-3.36L23 10M1 14l5.35 4.36A9 9 0 0020.49 15" />
+                            </svg>
+                            {loading ? 'Cargando…' : 'Actualizar'}
+                        </button>
+                    </div>
                 </div>
             </div>
 

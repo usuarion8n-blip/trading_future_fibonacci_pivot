@@ -9,6 +9,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { createChart, CrosshairMode, LineStyle } from 'lightweight-charts'
 import { useFibPivot } from '../hooks/useFibPivot'
+import { useVWAP } from '../hooks/useVWAP'
 
 const TIMEFRAMES = [
     { label: '1m', seconds: 60 },
@@ -108,6 +109,7 @@ export default function CandlestickChart({ priceObj }) {
     const containerRef = useRef(null)
     const chartRef = useRef(null)
     const seriesRef = useRef(null)
+    const vwapSeriesRef = useRef(null)
 
     // Restaurar timeframe y candles desde localStorage antes del primer render
     const initialTf = loadActiveTf()
@@ -121,6 +123,7 @@ export default function CandlestickChart({ priceObj }) {
     const [klineLoading, setKlineLoading] = useState(false)
 
     const { levels, prevLevels, loading: pivotLoading, error: pivotError } = useFibPivot()
+    const { vwapData, activeVwap } = useVWAP()
 
     // Store activeTf in a ref so the onmessage closure uses the latest value
     const tfRef = useRef(initialTf)
@@ -214,8 +217,17 @@ export default function CandlestickChart({ priceObj }) {
             wickDownColor: '#ff4d6a',
         })
 
+        const vwapSeries = chart.addLineSeries({
+            color: '#00b8d9',
+            lineWidth: 2,
+            crosshairMarkerVisible: false,
+            lastValueVisible: false,
+            priceLineVisible: false,
+        })
+
         chartRef.current = chart
         seriesRef.current = series
+        vwapSeriesRef.current = vwapSeries
 
         // Mostrar velas de localStorage inmediatamente (sin esperar a la API)
         const savedCandles = [...candleMapRef.current.values()].sort((a, b) => a.time - b.time)
@@ -280,6 +292,24 @@ export default function CandlestickChart({ priceObj }) {
     useEffect(() => {
         drawLines(prevLevels, PREV_PIVOT_LINES, prevPriceLinesRef)
     }, [prevLevels])
+
+    // Sync VWAP data to its line series
+    useEffect(() => {
+        if (vwapSeriesRef.current && vwapData.length > 0) {
+            // Remove duplicates with the same time (Lightweight charts requires strictly ascending time)
+            const uniqueData = []
+            let lastTime = -1
+            for (const pt of vwapData) {
+                if (pt.time > lastTime) {
+                    uniqueData.push(pt)
+                    lastTime = pt.time
+                } else if (pt.time === lastTime) {
+                    uniqueData[uniqueData.length - 1] = pt // update last
+                }
+            }
+            vwapSeriesRef.current.setData(uniqueData)
+        }
+    }, [vwapData])
 
     // Update candle when a new price tick arrives
     useEffect(() => {
@@ -352,6 +382,11 @@ export default function CandlestickChart({ priceObj }) {
                     {prevLevels && !pivotLoading && (
                         <span className="pivot-badge ok" style={{ opacity: 0.6 }}>
                             🔸 P-2: {prevLevels.pivot?.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+                        </span>
+                    )}
+                    {activeVwap && (
+                        <span className="pivot-badge ok" style={{ borderColor: '#00b8d9', color: '#00b8d9' }}>
+                            🌊 VWAP: {activeVwap.toLocaleString('en-US', { maximumFractionDigits: 2 })}
                         </span>
                     )}
                 </div>
