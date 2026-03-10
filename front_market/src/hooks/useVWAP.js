@@ -1,3 +1,4 @@
+/*
 import { useState, useEffect, useRef, useCallback } from 'react'
 
 const SYMBOL_DB = 'BTCUSDT'
@@ -224,3 +225,5 @@ export function useVWAP() {
 
     return { vwapData, activeVwap }
 }
+
+*/

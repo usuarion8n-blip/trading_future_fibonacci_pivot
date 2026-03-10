@@ -81,7 +81,7 @@ function SummaryStrip({ trades }) {
     return (
         <div className="th-summary">
             <div className="th-summary-card">
-                <span className="th-summary-label">Trades en vista</span>
+                <span className="th-summary-label">Total Trades</span>
                 <span className="th-summary-value">{trades.length}</span>
             </div>
             <div className="th-summary-card">
@@ -111,6 +111,7 @@ function SummaryStrip({ trades }) {
 /* ── Main component ──────────────────────────────────── */
 export default function TradeHistory({ onBack }) {
     const [trades, setTrades] = useState([])
+    const [allTradesStats, setAllTradesStats] = useState([])
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState(null)
     const [page, setPage] = useState(0)
@@ -167,7 +168,30 @@ export default function TradeHistory({ onBack }) {
         setHasMore((data ?? []).length === PAGE_SIZE)
     }, [])
 
+    const fetchGlobalStats = useCallback(async (statusFilter, dFilter) => {
+        let query = supabase
+            .from('sim_trades')
+            .select('status, pnl_usdt')
+
+        if (statusFilter !== 'ALL') {
+            query = query.eq('status', statusFilter)
+        }
+
+        if (dFilter !== 'ALL') {
+            const now = new Date()
+            if (dFilter === 'HOY') now.setHours(0, 0, 0, 0)
+            else if (dFilter === '1S') now.setDate(now.getDate() - 7)
+            else if (dFilter === '1M') now.setMonth(now.getMonth() - 1)
+            else if (dFilter === '1A') now.setFullYear(now.getFullYear() - 1)
+            query = query.gte('entry_ts', now.toISOString())
+        }
+
+        const { data } = await query
+        if (data) setAllTradesStats(data)
+    }, [])
+
     useEffect(() => { fetchTrades(page, filter, dateFilter) }, [fetchTrades, page, filter, dateFilter])
+    useEffect(() => { fetchGlobalStats(filter, dateFilter) }, [fetchGlobalStats, filter, dateFilter])
 
     const handleFilter = (f) => {
         setPage(0)
@@ -255,7 +279,7 @@ export default function TradeHistory({ onBack }) {
             </div>
 
             {/* ── Summary ── */}
-            <SummaryStrip trades={trades} />
+            <SummaryStrip trades={allTradesStats} />
 
             {/* ── Error ── */}
             {error && (
