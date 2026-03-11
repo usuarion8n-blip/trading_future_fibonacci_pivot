@@ -64,7 +64,9 @@ const COLUMNS = [
     { key: 'sl_price', label: 'SL', render: r => <span className="th-mono th-sl">{fmtPrice(r.sl_price)}</span> },
     { key: 'exit_price', label: 'Precio salida', render: r => <span className="th-mono">{fmtPrice(r.exit_price)}</span> },
     { key: 'exit_reason', label: 'Razón salida', render: r => r.exit_reason ? <span className="th-reason">{r.exit_reason}</span> : <span className="th-muted">—</span> },
-    { key: 'pnl_usdt', label: 'PnL (USDT)', render: r => <Pnl value={r.pnl_usdt} /> },
+    { key: 'pnl_usdt', label: 'PnL Bruto (USDT)', render: r => <Pnl value={r.pnl_usdt} /> },
+    { key: 'comisiones', label: 'Comisiones', render: r => <span className="th-mono th-muted">{r.meta?.fees_usdt != null ? fmtPrice(r.meta.fees_usdt, 4) : (r.status !== 'OPEN' ? fmtPrice(0, 4) : '—')}</span> },
+    { key: 'pnl_neto', label: 'PnL Neto', render: r => <Pnl value={r.meta?.net_pnl_usdt != null ? r.meta.net_pnl_usdt : (r.status !== 'OPEN' ? 0 : null)} /> },
     { key: 'exit_ts', label: 'Salida', render: r => <span className="th-mono th-muted">{fmtDate(r.exit_ts)}</span> },
     { key: 'pivot_base_day', label: 'Pivot Day', render: r => <span className="th-mono th-muted">{r.pivot_base_day ?? '—'}</span> },
 ]
@@ -72,10 +74,11 @@ const COLUMNS = [
 /* ── Summary strip ───────────────────────────────────── */
 function SummaryStrip({ trades }) {
     if (!trades.length) return null
-    const closed = trades.filter(t => t.status !== 'OPEN' && t.pnl_usdt != null)
-    const wins = closed.filter(t => t.pnl_usdt > 0).length
-    const losses = closed.filter(t => t.pnl_usdt < 0).length
-    const totalPnl = closed.reduce((acc, t) => acc + Number(t.pnl_usdt), 0)
+    const closed = trades.filter(t => t.status !== 'OPEN' && (t.pnl_usdt != null || t.meta?.net_pnl_usdt != null))
+    const wins = closed.filter(t => (t.meta?.net_pnl_usdt ?? t.pnl_usdt) > 0).length
+    const losses = closed.filter(t => (t.meta?.net_pnl_usdt ?? t.pnl_usdt) < 0).length
+    const totalPnl = closed.reduce((acc, t) => acc + Number(t.pnl_usdt || 0), 0)
+    const totalNetPnl = closed.reduce((acc, t) => acc + Number(t.meta?.net_pnl_usdt ?? 0), 0)
     const wr = closed.length ? ((wins / closed.length) * 100).toFixed(1) : null
 
     return (
@@ -99,9 +102,15 @@ function SummaryStrip({ trades }) {
                 </div>
             )}
             <div className="th-summary-card">
-                <span className="th-summary-label">PnL acumulado</span>
+                <span className="th-summary-label">PnL Bruto</span>
                 <span className={`th-summary-value th-mono ${totalPnl > 0 ? 'th-pnl-pos' : totalPnl < 0 ? 'th-pnl-neg' : ''}`}>
                     {totalPnl > 0 ? '+' : ''}{fmtPrice(totalPnl)} USDT
+                </span>
+            </div>
+            <div className="th-summary-card">
+                <span className="th-summary-label">PnL Neto</span>
+                <span className={`th-summary-value th-mono ${totalNetPnl > 0 ? 'th-pnl-pos' : totalNetPnl < 0 ? 'th-pnl-neg' : ''}`}>
+                    {totalNetPnl > 0 ? '+' : ''}{fmtPrice(totalNetPnl)} USDT
                 </span>
             </div>
         </div>
@@ -171,7 +180,8 @@ export default function TradeHistory({ onBack }) {
     const fetchGlobalStats = useCallback(async (statusFilter, dFilter) => {
         let query = supabase
             .from('sim_trades')
-            .select('status, pnl_usdt')
+            .select('id, status, pnl_usdt, meta')
+            .order('entry_ts', { ascending: true })
 
         if (statusFilter !== 'ALL') {
             query = query.eq('status', statusFilter)
@@ -187,7 +197,15 @@ export default function TradeHistory({ onBack }) {
         }
 
         const { data } = await query
-        if (data) setAllTradesStats(data)
+        if (data) {
+            let runningNet = 0;
+            const enhancedData = data.map(d => {
+                const net = d.meta?.net_pnl_usdt ?? 0;
+                runningNet += Number(net);
+                return { ...d, acc_net_pnl: runningNet };
+            });
+            setAllTradesStats(enhancedData)
+        }
     }, [])
 
     useEffect(() => { fetchTrades(page, filter, dateFilter) }, [fetchTrades, page, filter, dateFilter])
@@ -319,7 +337,7 @@ export default function TradeHistory({ onBack }) {
                                 <tr key={row.id} className={`th-tr th-tr--${row.status?.toLowerCase()}`}>
                                     {COLUMNS.map(col => (
                                         <td key={col.key} className="th-td">
-                                            {col.render(row)}
+                                            {col.render(row, allTradesStats)}
                                         </td>
                                     ))}
                                 </tr>
