@@ -417,6 +417,7 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
                 tp_pct: TP_PCT,
                 sl_pct: SL_PCT,
                 qty_btc: qtyAdj,
+                entry_order_id: entryOrder?.orderId ?? null,
                 tp_algo_id: tpOrder?.algoId ?? null,
                 sl_algo_id: slOrder?.algoId ?? null,
                 binance_entry_order: entryOrder,
@@ -444,6 +445,7 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             qty: qtyAdj,
             meta: row.meta,
             pivot_base_day_used,
+            entryOrderId: entryOrder?.orderId ?? null,
             tpAlgoId: tpOrder?.algoId,
             slAlgoId: slOrder?.algoId,
         });
@@ -519,6 +521,57 @@ function pickAlgoObj(resp) {
     return resp;
 }
 
+function sumTradeQty(trades) {
+    return (trades || []).reduce((acc, t) => acc + Number(t.qty || 0), 0);
+}
+
+function sumTradeCommissionUsdt(trades) {
+    return (trades || []).reduce((acc, t) => {
+        const asset = String(t.commissionAsset || "");
+        const commission = Math.abs(Number(t.commission || 0));
+
+        // En USDⓈ-M Futures normalmente viene en USDT.
+        // Si llegara otra asset, la ignoramos para no contaminar el cálculo.
+        if (asset === "USDT") return acc + commission;
+
+        return acc;
+    }, 0);
+}
+
+function weightedAveragePrice(trades, fallbackPrice) {
+    const totalQty = sumTradeQty(trades);
+    if (!totalQty) return Number(fallbackPrice || 0);
+
+    const totalNotional = (trades || []).reduce((acc, t) => {
+        return acc + Number(t.price || 0) * Number(t.qty || 0);
+    }, 0);
+
+    return totalNotional / totalQty;
+}
+
+function sumRealizedPnl(trades) {
+    return (trades || []).reduce((acc, t) => acc + Number(t.realizedPnl || 0), 0);
+}
+
+async function getUserTradesByOrderId(symbol, orderId) {
+    if (!orderId) return [];
+    try {
+        const resp = await signedRequest("GET", "/fapi/v1/userTrades", {
+            symbol,
+            orderId: String(orderId),
+        });
+
+        return Array.isArray(resp) ? resp : [];
+    } catch (e) {
+        console.error("❌ getUserTradesByOrderId failed:", {
+            symbol,
+            orderId,
+            error: e.message,
+        });
+        return [];
+    }
+}
+
 async function reconcileOpenTrades() {
     if (DRY_RUN) return;
     if (openTrades.size === 0) return;
@@ -550,8 +603,22 @@ async function reconcileOpenTrades() {
             if (reason === "TP") await cancelAlgoSafe(t.slAlgoId);
             if (reason === "SL") await cancelAlgoSafe(t.tpAlgoId);
 
-            // 5) Calcular salida/PnL
-            let exitPrice = Number(real?.avgPrice);
+            // 5) Obtener fills reales de entrada y salida desde Binance
+            const entryTrades = t.entryOrderId
+                ? await getUserTradesByOrderId(SYMBOL_DB, t.entryOrderId)
+                : [];
+
+            const exitTrades = triggeredOrderId
+                ? await getUserTradesByOrderId(SYMBOL_DB, triggeredOrderId)
+                : [];
+
+            // precios efectivos promedio por fills
+            let entryPrice = weightedAveragePrice(entryTrades, t.entryPrice);
+            if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
+                entryPrice = Number(t.entryPrice);
+            }
+
+            let exitPrice = weightedAveragePrice(exitTrades, real?.avgPrice);
             if (!Number.isFinite(exitPrice) || exitPrice <= 0) {
                 exitPrice = t.side === "LONG"
                     ? (lastBid ?? t.tpPrice ?? t.entryPrice)
@@ -559,9 +626,27 @@ async function reconcileOpenTrades() {
             }
 
             const exitTs = new Date().toISOString();
-            const pnl = t.side === "LONG"
-                ? (exitPrice - t.entryPrice) * t.qty
-                : (t.entryPrice - exitPrice) * t.qty;
+
+            // qty real ejecutada; fallback a la qty guardada
+            const entryQtyReal = sumTradeQty(entryTrades);
+            const exitQtyReal = sumTradeQty(exitTrades);
+            const pnlQty = entryQtyReal > 0 ? entryQtyReal : (exitQtyReal > 0 ? exitQtyReal : t.qty);
+
+            // pnl bruto por movimiento
+            const grossPnl = t.side === "LONG"
+                ? (exitPrice - entryPrice) * pnlQty
+                : (entryPrice - exitPrice) * pnlQty;
+
+            // comisiones reales Binance
+            const entryFeesUsdt = sumTradeCommissionUsdt(entryTrades);
+            const exitFeesUsdt = sumTradeCommissionUsdt(exitTrades);
+            const feesUsdt = entryFeesUsdt + exitFeesUsdt;
+
+            // pnl neto
+            const netPnl = grossPnl - feesUsdt;
+
+            // realizedPnl reportado por fills de salida
+            const realizedPnlBinance = sumRealizedPnl(exitTrades);
 
             // 6) Update Supabase
             const patch = {
@@ -571,7 +656,7 @@ async function reconcileOpenTrades() {
                 exit_reason: reason,
                 exit_bid: lastBid,
                 exit_ask: lastAsk,
-                pnl_usdt: pnl,
+                pnl_usdt: netPnl,
                 meta: {
                     ...(t.meta || {}),
                     exit_reason: reason,
@@ -579,7 +664,24 @@ async function reconcileOpenTrades() {
                     exit_ts: exitTs,
                     exit_bid: lastBid,
                     exit_ask: lastAsk,
-                    pnl_usdt: pnl,
+
+                    gross_pnl_usdt: Number(grossPnl.toFixed(8)),
+                    fees_usdt: Number(feesUsdt.toFixed(8)),
+                    net_pnl_usdt: Number(netPnl.toFixed(8)),
+                    pnl_usdt: Number(netPnl.toFixed(8)),
+
+                    entry_fees_usdt: Number(entryFeesUsdt.toFixed(8)),
+                    exit_fees_usdt: Number(exitFeesUsdt.toFixed(8)),
+                    entry_price_effective: Number(entryPrice.toFixed(8)),
+                    exit_price_effective: Number(exitPrice.toFixed(8)),
+                    qty_closed_btc: Number(pnlQty.toFixed(8)),
+                    realized_pnl_binance_usdt: Number(realizedPnlBinance.toFixed(8)),
+
+                    entry_trades_count: entryTrades.length,
+                    exit_trades_count: exitTrades.length,
+                    binance_entry_trades: entryTrades,
+                    binance_exit_trades: exitTrades,
+
                     binance_exit_order: real,
                     binance_exit_order_id: real?.orderId,
                     binance_exit_update_time: real?.updateTime,
@@ -600,9 +702,12 @@ async function reconcileOpenTrades() {
                 id,
                 reason,
                 side: t.side,
-                entry: t.entryPrice,
-                exit: exitPrice,
-                pnl_usdt: Number(pnl.toFixed(6)),
+                entry: Number(entryPrice.toFixed(6)),
+                exit: Number(exitPrice.toFixed(6)),
+                gross_pnl_usdt: Number(grossPnl.toFixed(6)),
+                fees_usdt: Number(feesUsdt.toFixed(6)),
+                net_pnl_usdt: Number(netPnl.toFixed(6)),
+                realized_pnl_binance_usdt: Number(realizedPnlBinance.toFixed(6)),
                 lockedLevelKey,
             });
 
@@ -638,12 +743,15 @@ async function restoreOpenTrades() {
             qty: Number(r.meta?.qty_btc ?? QTY_BTC),
             meta: r.meta || {},
             pivot_base_day_used: r.pivot_base_day,
+            entryOrderId:
+                r.meta?.binance_entry_order?.orderId ??
+                r.meta?.entry_order_id ??
+                null,
             tpAlgoId:
                 r.meta?.tp_algo_id ??
                 r.meta?.binance_tp_order?.algoId ??
                 r.meta?.binance_tp_order?.id ??
                 null,
-
             slAlgoId:
                 r.meta?.sl_algo_id ??
                 r.meta?.binance_sl_order?.algoId ??
