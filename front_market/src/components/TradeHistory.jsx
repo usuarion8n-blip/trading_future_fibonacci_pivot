@@ -128,6 +128,7 @@ export default function TradeHistory({ onBack }) {
     const [total, setTotal] = useState(null)
     const [filter, setFilter] = useState('ALL')
     const [dateFilter, setDateFilter] = useState('ALL')
+    const [nivelFilter, setNivelFilter] = useState('ALL')
     const [statuses, setStatuses] = useState([])   // dynamic from DB
 
     // Fetch distinct status values once on mount
@@ -142,7 +143,7 @@ export default function TradeHistory({ onBack }) {
             })
     }, [])
 
-    const fetchTrades = useCallback(async (pageIndex, statusFilter, dFilter) => {
+    const fetchTrades = useCallback(async (pageIndex, statusFilter, dFilter, nFilter) => {
         setLoading(true)
         setError(null)
 
@@ -168,6 +169,12 @@ export default function TradeHistory({ onBack }) {
             query = query.gte('entry_ts', now.toISOString())
         }
 
+        if (nFilter === 'VWAP') {
+            query = query.eq('level', 'vwap')
+        } else if (nFilter === 'PIVOTS') {
+            query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
+        }
+
         const { data, error: err, count } = await query
 
         setLoading(false)
@@ -177,7 +184,7 @@ export default function TradeHistory({ onBack }) {
         setHasMore((data ?? []).length === PAGE_SIZE)
     }, [])
 
-    const fetchGlobalStats = useCallback(async (statusFilter, dFilter) => {
+    const fetchGlobalStats = useCallback(async (statusFilter, dFilter, nFilter) => {
         let query = supabase
             .from('sim_trades')
             .select('id, status, pnl_usdt, meta')
@@ -196,6 +203,12 @@ export default function TradeHistory({ onBack }) {
             query = query.gte('entry_ts', now.toISOString())
         }
 
+        if (nFilter === 'VWAP') {
+            query = query.eq('level', 'vwap')
+        } else if (nFilter === 'PIVOTS') {
+            query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
+        }
+
         const { data } = await query
         if (data) {
             let runningNet = 0;
@@ -208,8 +221,8 @@ export default function TradeHistory({ onBack }) {
         }
     }, [])
 
-    useEffect(() => { fetchTrades(page, filter, dateFilter) }, [fetchTrades, page, filter, dateFilter])
-    useEffect(() => { fetchGlobalStats(filter, dateFilter) }, [fetchGlobalStats, filter, dateFilter])
+    useEffect(() => { fetchTrades(page, filter, dateFilter, nivelFilter) }, [fetchTrades, page, filter, dateFilter, nivelFilter])
+    useEffect(() => { fetchGlobalStats(filter, dateFilter, nivelFilter) }, [fetchGlobalStats, filter, dateFilter, nivelFilter])
 
     const handleFilter = (f) => {
         setPage(0)
@@ -221,8 +234,14 @@ export default function TradeHistory({ onBack }) {
         setDateFilter(f)
     }
 
+    const handleNivelFilter = (f) => {
+        setPage(0)
+        setNivelFilter(f)
+    }
+
     const FILTERS = statuses.length ? statuses : ['ALL']
     const DATE_FILTERS = ['ALL', 'HOY', '1S', '1M', '1A']
+    const NIVEL_FILTERS = ['ALL', 'VWAP', 'PIVOTS']
 
     return (
         <div className="th-page">
@@ -263,6 +282,21 @@ export default function TradeHistory({ onBack }) {
                     </div>
 
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                        <span className="th-muted th-mono" style={{ fontSize: '0.8rem' }}>NIVEL:</span>
+                        <div className="th-filters">
+                            {NIVEL_FILTERS.map(f => (
+                                <button
+                                    key={f}
+                                    className={`th-filter-btn ${nivelFilter === f ? 'th-filter-btn--active' : ''}`}
+                                    onClick={() => handleNivelFilter(f)}
+                                >
+                                    {f}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                         <span className="th-muted th-mono" style={{ fontSize: '0.8rem' }}>ESTADO:</span>
                         {/* Status filter buttons */}
                         <div className="th-filters">
@@ -279,7 +313,7 @@ export default function TradeHistory({ onBack }) {
 
                         <button
                             className="th-refresh-btn"
-                            onClick={() => fetchTrades(page, filter, dateFilter)}
+                            onClick={() => fetchTrades(page, filter, dateFilter, nivelFilter)}
                             disabled={loading}
                         >
                             <svg
