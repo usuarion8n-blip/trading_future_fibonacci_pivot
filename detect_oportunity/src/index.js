@@ -56,7 +56,7 @@ async function placeConditionalAlgo({
         algoType: "CONDITIONAL",
         symbol,
         side,
-        type: orderType, // "TAKE_PROFIT_MARKET" | "STOP_MARKET"
+        type: orderType, // TAKE_PROFIT_MARKET | STOP_MARKET
         triggerPrice: fmt(triggerPrice, priceDec),
         quantity: fmt(quantity, qtyDec),
         reduceOnly: "true",
@@ -84,7 +84,7 @@ async function publicRequest(path, params = {}) {
 // ======================
 // Config
 // ======================
-const DRY_RUN = String(process.env.DRY_RUN ?? "1") === "1"; // ✅ 1 = no opera, 0 = opera real
+const DRY_RUN = String(process.env.DRY_RUN ?? "1") === "1";
 
 const SYMBOL_WS = process.env.SYMBOL_WS || "btcusdt";
 const SYMBOL_DB = process.env.SYMBOL_DB || "BTCUSDT";
@@ -96,6 +96,12 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const PIVOT_TABLE = process.env.PIVOT_TABLE || "fib_pivot_daily";
 const TRADES_TABLE = process.env.TRADES_TABLE || "sim_trades";
+
+// ======================
+// Ownership / strategy segregation
+// ======================
+const STRATEGY_NAME = process.env.STRATEGY_NAME || "PIVOT_SR";
+const SERVICE_NAME = process.env.SERVICE_NAME || "pivot_sr_service";
 
 const TOUCH_BUFFER_BPS = Number(process.env.TOUCH_BUFFER_BPS ?? 2);
 const REBOUND_BPS = Number(process.env.REBOUND_BPS ?? 6);
@@ -133,7 +139,6 @@ let TICK_SIZE_STR = null;
 let STEP_SIZE_STR = null;
 
 function decimalsFromStep(stepStr) {
-    // "0.00100000" -> 3
     const s = String(stepStr);
     const dot = s.indexOf(".");
     if (dot === -1) return 0;
@@ -157,6 +162,10 @@ function roundToTick(value, tick) {
 
 function fmt(value, decimals) {
     return Number(value).toFixed(decimals);
+}
+
+function makeTradeGroupId() {
+    return crypto.randomUUID();
 }
 
 async function loadSymbolFilters() {
@@ -183,6 +192,8 @@ async function loadSymbolFilters() {
         tickSize: TICK_SIZE,
         stepSize: STEP_SIZE,
         minQty: MIN_QTY,
+        strategy_name: STRATEGY_NAME,
+        service_name: SERVICE_NAME,
     });
 }
 
@@ -237,20 +248,21 @@ function bpsDistance(price, levelPrice) {
 // ======================
 // Trade tracker
 // ======================
-const openTrades = new Map(); // id -> state
-let lockedLevelKey = null; // `${baseDay}:${level}`
-let openingTrade = false; // evita dobles entradas mientras una apertura está en curso
+const openTrades = new Map();
+let lockedLevelKey = null;
+let openingTrade = false;
 
 function updateLockedLevel(baseDay, level) {
     const nextKey = levelKey(baseDay, level);
     const prevKey = lockedLevelKey;
 
-    // solo cambia si realmente es otro nivel
     if (prevKey !== nextKey) {
         lockedLevelKey = nextKey;
         console.log("🔒 Locked level changed:", {
             previous: prevKey,
             current: lockedLevelKey,
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
         });
     } else {
         console.log("🔒 Locked level remains:", lockedLevelKey);
@@ -261,21 +273,32 @@ function levelKey(baseDay, level) {
     return `${baseDay}:${level}`;
 }
 
+async function hasOpenTradeInDb() {
+    const { count, error } = await supabase
+        .from(TRADES_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("symbol", SYMBOL_DB)
+        .eq("status", "OPEN");
+
+    if (error) throw error;
+    return (count || 0) > 0;
+}
+
 function canOpenNewTrade() {
     return openTrades.size < MAX_OPEN_TRADES;
 }
 
-const lastSignalAt = new Map(); // cooldown key -> ts
+const lastSignalAt = new Map();
 
 // detector per (baseDay:level)
 const detectorTouched = new Map();
 const detectorConfirm = new Map();
-const detectorTouchSide = new Map(); // ABOVE | BELOW
+const detectorTouchSide = new Map();
+
 function detKey(baseDay, level) {
     return `${baseDay}:${level}`;
 }
 
-// último bid/ask para reconciliación
 let lastBid = null;
 let lastAsk = null;
 
@@ -288,21 +311,26 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
         return null;
     }
 
+    if (await hasOpenTradeInDb()) {
+        console.log("⛔ Ya existe un trade OPEN en BD para este símbolo");
+        return null;
+    }
+
     openingTrade = true;
 
     try {
         const cdKey = `${pivot_base_day_used}:${level}:${side}`;
         const nowMs = Date.now();
         const last = lastSignalAt.get(cdKey) || 0;
-        if (nowMs - last < COOLDOWN_MS) return null;
 
+        if (nowMs - last < COOLDOWN_MS) return null;
         if (!canOpenNewTrade()) return null;
         if (!pivot_base_day_used) return null;
 
-        // qty ajustada a stepSize
         const qtyRaw = QTY_BTC;
         const qtyDec = decimalsFromStep(STEP_SIZE_STR);
         const qtyAdj = Number(fmt(floorToStep(qtyRaw, STEP_SIZE), qtyDec));
+
         if (qtyAdj < MIN_QTY) {
             console.log("⛔ qty < minQty, skip", { qtyRaw, qtyAdj, minQty: MIN_QTY });
             return null;
@@ -311,7 +339,6 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
         const entrySide = side === "LONG" ? "BUY" : "SELL";
         const closeSide = side === "LONG" ? "SELL" : "BUY";
 
-        // Entry MARKET
         if (DRY_RUN) {
             console.log("🧪 DRY_RUN openTradeReal", { side, level, qtyAdj });
             return null;
@@ -331,28 +358,25 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             return null;
         }
 
-        // entryPrice (si avgPrice viene 0, fallback a ask/bid)
         let entryPrice = Number(entryOrder?.avgPrice);
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
             entryPrice = Number(side === "LONG" ? ask : bid);
         }
 
         const entryTs = new Date().toISOString();
+        const tradeGroupId = makeTradeGroupId();
 
-        // TP/SL por %
         const tpDelta = entryPrice * TP_PCT;
         const slDelta = entryPrice * SL_PCT;
 
         let tpPrice = side === "LONG" ? entryPrice + tpDelta : entryPrice - tpDelta;
         let slPrice = side === "LONG" ? entryPrice - slDelta : entryPrice + slDelta;
 
-        // redondeo a tickSize
         tpPrice = roundToTick(tpPrice, TICK_SIZE);
         slPrice = roundToTick(slPrice, TICK_SIZE);
 
         const priceDec = decimalsFromStep(TICK_SIZE_STR);
 
-        // Colocar TP/SL (si falla, cerrar posición inmediatamente)
         let tpOrder = null;
         let slOrder = null;
 
@@ -379,7 +403,6 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
         } catch (e) {
             console.error("❌ TP/SL failed, emergency close:", e.message);
 
-            // intento cerrar inmediatamente para no quedar sin SL
             try {
                 await signedRequest("POST", "/fapi/v1/order", {
                     symbol: SYMBOL_DB,
@@ -396,10 +419,12 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             return null;
         }
 
-        // Guardar en Supabase
         const row = {
             symbol: SYMBOL_DB,
             interval: INTERVAL,
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
+            trade_group_id: tradeGroupId,
             pivot_base_day: pivot_base_day_used,
             level,
             side,
@@ -411,6 +436,9 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             sl_price: slPrice,
             status: "OPEN",
             meta: {
+                strategy_name: STRATEGY_NAME,
+                service_name: SERVICE_NAME,
+                trade_group_id: tradeGroupId,
                 source: "bookTicker",
                 pivot_price: levelPrice,
                 distance_bps_at_signal: Number(distBps.toFixed(2)),
@@ -426,9 +454,48 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             },
         };
 
-        const { data, error } = await supabase.from(TRADES_TABLE).insert(row).select().single();
-        if (error) {
-            console.error("❌ Supabase insert failed:", error.message);
+        let data;
+        try {
+            const res = await supabase.from(TRADES_TABLE).insert(row).select().single();
+
+            if (res.error) {
+                throw res.error;
+            }
+
+            data = res.data;
+        } catch (e) {
+            console.error("❌ Supabase insert failed AFTER Binance entry. Sending emergency close:", e.message);
+
+            // cancelar algos si alcanzaron a crearse
+            await cancelAlgoSafe(tpOrder?.algoId ?? null);
+            await cancelAlgoSafe(slOrder?.algoId ?? null);
+
+            // cerrar inmediatamente la posición real para no quedar desincronizado
+            try {
+                const emergencyClose = await signedRequest("POST", "/fapi/v1/order", {
+                    symbol: SYMBOL_DB,
+                    side: closeSide,
+                    type: "MARKET",
+                    reduceOnly: "true",
+                    quantity: fmt(qtyAdj, qtyDec),
+                    newOrderRespType: "RESULT",
+                });
+
+                console.error("🧯 Emergency close sent after DB insert failure.", {
+                    entryOrderId: entryOrder?.orderId ?? null,
+                    emergencyCloseOrderId: emergencyClose?.orderId ?? null,
+                    strategy_name: STRATEGY_NAME,
+                    service_name: SERVICE_NAME,
+                });
+            } catch (e2) {
+                console.error("🧨 Emergency close FAILED after DB insert failure:", {
+                    error: e2.message,
+                    entryOrderId: entryOrder?.orderId ?? null,
+                    strategy_name: STRATEGY_NAME,
+                    service_name: SERVICE_NAME,
+                });
+            }
+
             return null;
         }
 
@@ -436,6 +503,9 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
 
         openTrades.set(data.id, {
             id: data.id,
+            strategyName: STRATEGY_NAME,
+            serviceName: SERVICE_NAME,
+            tradeGroupId,
             side,
             level,
             entryPrice,
@@ -446,22 +516,21 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             meta: row.meta,
             pivot_base_day_used,
             entryOrderId: entryOrder?.orderId ?? null,
-            tpAlgoId: tpOrder?.algoId,
-            slAlgoId: slOrder?.algoId,
+            tpAlgoId: tpOrder?.algoId ?? null,
+            slAlgoId: slOrder?.algoId ?? null,
         });
 
-        // lock por nivel:
-        // este nivel queda bloqueado hasta que otra oportunidad válida
-        // se detecte en otro soporte/resistencia
         updateLockedLevel(pivot_base_day_used, level);
 
-        // limpiar detectores para reiniciar el escaneo
         detectorTouched.clear();
         detectorConfirm.clear();
         detectorTouchSide.clear();
 
         console.log("✅ REAL TRADE OPENED", {
             id: data.id,
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
+            trade_group_id: tradeGroupId,
             side,
             level,
             entryPrice,
@@ -480,29 +549,72 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
 }
 
 // ======================
-// Reconcile TP/SL fills (polling)
+// Reconcile helpers
 // ======================
 async function cancelOrderSafe(orderId) {
     if (!orderId) return;
     try {
-        await signedRequest("DELETE", "/fapi/v1/order", { symbol: SYMBOL_DB, orderId: String(orderId) });
-    } catch { /* ignore */ }
+        await signedRequest("DELETE", "/fapi/v1/order", {
+            symbol: SYMBOL_DB,
+            orderId: String(orderId),
+        });
+    } catch { }
 }
 
 async function cancelAlgoSafe(algoId) {
     if (!algoId) return;
     try {
         await signedRequest("DELETE", "/fapi/v1/algoOrder", { algoId: String(algoId) });
-    } catch { /* ignore */ }
+    } catch { }
 }
 
 async function getOrderStatus(orderId) {
     if (!orderId) return null;
-    return signedRequest("GET", "/fapi/v1/order", { symbol: SYMBOL_DB, orderId: String(orderId) });
+    return signedRequest("GET", "/fapi/v1/order", {
+        symbol: SYMBOL_DB,
+        orderId: String(orderId),
+    });
 }
 
 async function getAlgoStatus(algoId) {
     return signedRequest("GET", "/fapi/v1/algoOrder", { algoId: String(algoId) });
+}
+
+async function getPositionRisk(symbol) {
+    try {
+        const resp = await signedRequest("GET", "/fapi/v2/positionRisk", { symbol });
+
+        if (Array.isArray(resp)) return resp[0] ?? null;
+        return resp ?? null;
+    } catch (e) {
+        console.error("❌ getPositionRisk failed:", {
+            symbol,
+            error: e.message,
+        });
+        return null;
+    }
+}
+
+function isPositionFlat(positionRisk) {
+    if (!positionRisk) return null;
+    const amt = Number(positionRisk.positionAmt ?? 0);
+    return Math.abs(amt) < 1e-12;
+}
+
+async function getRecentUserTrades(symbol, limit = 200) {
+    try {
+        const resp = await signedRequest("GET", "/fapi/v1/userTrades", {
+            symbol,
+            limit: String(limit),
+        });
+        return Array.isArray(resp) ? resp : [];
+    } catch (e) {
+        console.error("❌ getRecentUserTrades failed:", {
+            symbol,
+            error: e.message,
+        });
+        return [];
+    }
 }
 
 function pickAlgoObj(resp) {
@@ -529,11 +641,7 @@ function sumTradeCommissionUsdt(trades) {
     return (trades || []).reduce((acc, t) => {
         const asset = String(t.commissionAsset || "");
         const commission = Math.abs(Number(t.commission || 0));
-
-        // En USDⓈ-M Futures normalmente viene en USDT.
-        // Si llegara otra asset, la ignoramos para no contaminar el cálculo.
         if (asset === "USDT") return acc + commission;
-
         return acc;
     }, 0);
 }
@@ -551,6 +659,57 @@ function weightedAveragePrice(trades, fallbackPrice) {
 
 function sumRealizedPnl(trades) {
     return (trades || []).reduce((acc, t) => acc + Number(t.realizedPnl || 0), 0);
+}
+
+function tradeTimeMs(t) {
+    return Number(t.time ?? t.timestamp ?? 0);
+}
+
+function groupExitTradesForSide(trades, side) {
+    const expectedSide = side === "LONG" ? "SELL" : "BUY";
+    return (trades || []).filter(t => String(t.side || "").toUpperCase() === expectedSide);
+}
+
+function filterTradesAfterEntry(trades, entryTs) {
+    const entryMs = new Date(entryTs).getTime();
+    return (trades || []).filter(t => tradeTimeMs(t) >= entryMs);
+}
+
+function sortTradesAsc(trades) {
+    return [...(trades || [])].sort((a, b) => tradeTimeMs(a) - tradeTimeMs(b));
+}
+
+function takeTradesUntilQty(trades, targetQty) {
+    const out = [];
+    let acc = 0;
+
+    for (const t of sortTradesAsc(trades)) {
+        const q = Number(t.qty || 0);
+        if (q <= 0) continue;
+
+        out.push(t);
+        acc += q;
+
+        if (acc + 1e-12 >= targetQty) break;
+    }
+
+    return out;
+}
+
+function detectFallbackExitReason(exitTrades, side, tpPrice, slPrice) {
+    if (!exitTrades?.length) return "BINANCE_CLOSED_FALLBACK";
+
+    const exitPx = weightedAveragePrice(exitTrades, 0);
+    if (!Number.isFinite(exitPx) || exitPx <= 0) return "BINANCE_CLOSED_FALLBACK";
+
+    const distTp = Math.abs(exitPx - Number(tpPrice || 0));
+    const distSl = Math.abs(exitPx - Number(slPrice || 0));
+
+    if (Number.isFinite(distTp) && Number.isFinite(distSl)) {
+        return distTp <= distSl ? "TP_FALLBACK" : "SL_FALLBACK";
+    }
+
+    return "BINANCE_CLOSED_FALLBACK";
 }
 
 async function getUserTradesByOrderId(symbol, orderId) {
@@ -572,47 +731,120 @@ async function getUserTradesByOrderId(symbol, orderId) {
     }
 }
 
+// ======================
+// Reconcile OPEN trades
+// ======================
 async function reconcileOpenTrades() {
     if (DRY_RUN) return;
     if (openTrades.size === 0) return;
 
     for (const [id, t] of openTrades.entries()) {
         try {
-            // 1) Consultar ALGOs (no /order)
-            const tpAlgoRaw = t.tpAlgoId ? await getAlgoStatus(t.tpAlgoId) : null;
-            const slAlgoRaw = t.slAlgoId ? await getAlgoStatus(t.slAlgoId) : null;
+            let reason = null;
+            let triggeredOrderId = null;
+            let real = null;
+            let tpAlgo = null;
+            let slAlgo = null;
+            let entryTrades = [];
+            let exitTrades = [];
 
-            const tpAlgo = pickAlgoObj(tpAlgoRaw);
-            const slAlgo = pickAlgoObj(slAlgoRaw);
+            // =========================
+            // A) Intento normal vía algoOrder
+            // =========================
+            try {
+                const tpAlgoRaw = t.tpAlgoId ? await getAlgoStatus(t.tpAlgoId) : null;
+                const slAlgoRaw = t.slAlgoId ? await getAlgoStatus(t.slAlgoId) : null;
 
-            // 2) Ver si alguno ya generó una orden real (orderId)
-            const tpOrderId = tpAlgo?.orderId || tpAlgo?.actualOrderId || tpAlgo?.triggeredOrderId;
-            const slOrderId = slAlgo?.orderId || slAlgo?.actualOrderId || slAlgo?.triggeredOrderId;
+                tpAlgo = pickAlgoObj(tpAlgoRaw);
+                slAlgo = pickAlgoObj(slAlgoRaw);
 
-            // Si ninguno se activó, no hay nada que reconciliar
-            if (!tpOrderId && !slOrderId) continue;
+                const tpOrderId = tpAlgo?.orderId || tpAlgo?.actualOrderId || tpAlgo?.triggeredOrderId;
+                const slOrderId = slAlgo?.orderId || slAlgo?.actualOrderId || slAlgo?.triggeredOrderId;
 
-            const reason = tpOrderId ? "TP" : "SL";
-            const triggeredOrderId = tpOrderId ? tpOrderId : slOrderId;
+                if (tpOrderId || slOrderId) {
+                    reason = tpOrderId ? "TP" : "SL";
+                    triggeredOrderId = tpOrderId ? tpOrderId : slOrderId;
 
-            // 3) Consultar la ORDEN REAL ya creada por el algo
-            const real = await getOrderStatus(triggeredOrderId);
-            if (real?.status !== "FILLED") continue;
+                    real = await getOrderStatus(triggeredOrderId);
+                    if (real?.status !== "FILLED") {
+                        real = null;
+                        triggeredOrderId = null;
+                        reason = null;
+                    }
+                }
+            } catch (e) {
+                console.error("⚠️ normal algo reconcile failed, using fallback:", e.message);
+            }
 
-            // 4) Cancelar el ALGO opuesto (no /order)
+            // =========================
+            // B) Fallback por posición real en Binance
+            // =========================
+            if (!triggeredOrderId) {
+                const positionRisk = await getPositionRisk(SYMBOL_DB);
+                const flat = isPositionFlat(positionRisk);
+
+                // si la posición real todavía existe, no cierres en Supabase
+                if (flat === false) {
+                    continue;
+                }
+                if (flat === null) {
+                    console.error("⚠️ No pude determinar si la posición está flat");
+                    continue;
+                }
+
+                // si está flat, reconstruimos salida usando userTrades
+                entryTrades = t.entryOrderId
+                    ? await getUserTradesByOrderId(SYMBOL_DB, t.entryOrderId)
+                    : [];
+
+                const recentTrades = await getRecentUserTrades(SYMBOL_DB, 200);
+                const candidateExitTrades = takeTradesUntilQty(
+                    filterTradesAfterEntry(
+                        groupExitTradesForSide(recentTrades, t.side),
+                        t.entryTs
+                    ),
+                    t.qty
+                );
+
+                if (!candidateExitTrades.length) {
+                    console.error("⚠️ Position is flat but no exit trades found yet", {
+                        id,
+                        strategy_name: STRATEGY_NAME,
+                        service_name: SERVICE_NAME,
+                        entryTs: t.entryTs,
+                        side: t.side,
+                    });
+                    continue;
+                }
+
+                exitTrades = candidateExitTrades;
+                reason = detectFallbackExitReason(exitTrades, t.side, t.tpPrice, t.slPrice);
+
+                real = {
+                    status: "FILLED",
+                    orderId: exitTrades[0]?.orderId ?? null,
+                    avgPrice: weightedAveragePrice(exitTrades, 0),
+                    updateTime: tradeTimeMs(exitTrades[exitTrades.length - 1]),
+                };
+            } else {
+                entryTrades = t.entryOrderId
+                    ? await getUserTradesByOrderId(SYMBOL_DB, t.entryOrderId)
+                    : [];
+
+                exitTrades = triggeredOrderId
+                    ? await getUserTradesByOrderId(SYMBOL_DB, triggeredOrderId)
+                    : [];
+            }
+
+            // =========================
+            // C) Cancelar algo opuesto solo si fue cierre normal TP/SL
+            // =========================
             if (reason === "TP") await cancelAlgoSafe(t.slAlgoId);
             if (reason === "SL") await cancelAlgoSafe(t.tpAlgoId);
 
-            // 5) Obtener fills reales de entrada y salida desde Binance
-            const entryTrades = t.entryOrderId
-                ? await getUserTradesByOrderId(SYMBOL_DB, t.entryOrderId)
-                : [];
-
-            const exitTrades = triggeredOrderId
-                ? await getUserTradesByOrderId(SYMBOL_DB, triggeredOrderId)
-                : [];
-
-            // precios efectivos promedio por fills
+            // =========================
+            // D) Calcular precios / qty / fees / pnl
+            // =========================
             let entryPrice = weightedAveragePrice(entryTrades, t.entryPrice);
             if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
                 entryPrice = Number(t.entryPrice);
@@ -625,30 +857,28 @@ async function reconcileOpenTrades() {
                     : (lastAsk ?? t.tpPrice ?? t.entryPrice);
             }
 
-            const exitTs = new Date().toISOString();
+            const exitTs = exitTrades.length
+                ? new Date(tradeTimeMs(exitTrades[exitTrades.length - 1])).toISOString()
+                : new Date().toISOString();
 
-            // qty real ejecutada; fallback a la qty guardada
             const entryQtyReal = sumTradeQty(entryTrades);
             const exitQtyReal = sumTradeQty(exitTrades);
             const pnlQty = entryQtyReal > 0 ? entryQtyReal : (exitQtyReal > 0 ? exitQtyReal : t.qty);
 
-            // pnl bruto por movimiento
             const grossPnl = t.side === "LONG"
                 ? (exitPrice - entryPrice) * pnlQty
                 : (entryPrice - exitPrice) * pnlQty;
 
-            // comisiones reales Binance
             const entryFeesUsdt = sumTradeCommissionUsdt(entryTrades);
             const exitFeesUsdt = sumTradeCommissionUsdt(exitTrades);
             const feesUsdt = entryFeesUsdt + exitFeesUsdt;
 
-            // pnl neto
             const netPnl = grossPnl - feesUsdt;
-
-            // realizedPnl reportado por fills de salida
             const realizedPnlBinance = sumRealizedPnl(exitTrades);
 
-            // 6) Update Supabase
+            // =========================
+            // E) Update Supabase
+            // =========================
             const patch = {
                 status: "CLOSED",
                 exit_ts: exitTs,
@@ -656,9 +886,13 @@ async function reconcileOpenTrades() {
                 exit_reason: reason,
                 exit_bid: lastBid,
                 exit_ask: lastAsk,
-                pnl_usdt: Number(grossPnl.toFixed(8)),
+                pnl_usdt: Number(netPnl.toFixed(8)),
                 meta: {
                     ...(t.meta || {}),
+                    strategy_name: STRATEGY_NAME,
+                    service_name: SERVICE_NAME,
+                    trade_group_id: t.tradeGroupId ?? t.meta?.trade_group_id ?? null,
+
                     exit_reason: reason,
                     exit_price: exitPrice,
                     exit_ts: exitTs,
@@ -690,7 +924,14 @@ async function reconcileOpenTrades() {
                 },
             };
 
-            const { error } = await supabase.from(TRADES_TABLE).update(patch).eq("id", id);
+            const { error } = await supabase
+                .from(TRADES_TABLE)
+                .update(patch)
+                .eq("id", id)
+                .eq("symbol", SYMBOL_DB)
+                .eq("strategy_name", STRATEGY_NAME)
+                .eq("service_name", SERVICE_NAME);
+
             if (error) {
                 console.error("❌ Supabase close update failed:", error.message);
                 continue;
@@ -698,8 +939,11 @@ async function reconcileOpenTrades() {
 
             openTrades.delete(id);
 
-            console.log("🔴 TRADE CLOSED (algo reconciled)", {
+            console.log("🔴 TRADE CLOSED (reconciled)", {
                 id,
+                strategy_name: STRATEGY_NAME,
+                service_name: SERVICE_NAME,
+                trade_group_id: t.tradeGroupId,
                 reason,
                 side: t.side,
                 entry: Number(entryPrice.toFixed(6)),
@@ -720,8 +964,24 @@ async function reconcileOpenTrades() {
 async function restoreOpenTrades() {
     const { data, error } = await supabase
         .from(TRADES_TABLE)
-        .select("id, side, level, entry_price, tp_price, sl_price, entry_ts, meta, pivot_base_day")
+        .select(`
+            id,
+            symbol,
+            strategy_name,
+            service_name,
+            trade_group_id,
+            side,
+            level,
+            entry_price,
+            tp_price,
+            sl_price,
+            entry_ts,
+            meta,
+            pivot_base_day
+        `)
         .eq("symbol", SYMBOL_DB)
+        .eq("strategy_name", STRATEGY_NAME)
+        .eq("service_name", SERVICE_NAME)
         .eq("status", "OPEN")
         .order("entry_ts", { ascending: false })
         .limit(MAX_OPEN_TRADES);
@@ -734,6 +994,9 @@ async function restoreOpenTrades() {
     for (const r of data || []) {
         openTrades.set(r.id, {
             id: r.id,
+            strategyName: r.strategy_name,
+            serviceName: r.service_name,
+            tradeGroupId: r.trade_group_id ?? r.meta?.trade_group_id ?? null,
             side: r.side,
             level: r.level,
             entryPrice: Number(r.entry_price),
@@ -760,9 +1023,12 @@ async function restoreOpenTrades() {
         });
     }
 
-    console.log("♻️ Restored OPEN trades:", openTrades.size);
+    console.log("♻️ Restored OPEN trades:", {
+        strategy_name: STRATEGY_NAME,
+        service_name: SERVICE_NAME,
+        count: openTrades.size,
+    });
 
-    // restaurar lock (si existe)
     if (openTrades.size > 0 && !lockedLevelKey) {
         const any = openTrades.values().next().value;
         if (any?.pivot_base_day_used && any?.level) {
@@ -801,7 +1067,6 @@ async function processQuote({ bid, ask }) {
         const absBps = Math.abs(distBps);
         const k = detKey(item.baseDay, item.level);
 
-        // TOUCH
         if (!detectorTouched.get(k) && absBps <= TOUCH_BUFFER_BPS) {
             detectorTouched.set(k, true);
             detectorConfirm.set(k, 0);
@@ -813,10 +1078,6 @@ async function processQuote({ bid, ask }) {
             const prev = detectorConfirm.get(k) || 0;
             const touchSide = detectorTouchSide.get(k);
 
-            // =========================
-            // REBOTE ALCISTA
-            // Llegó desde arriba, tocó, y vuelve a quedar arriba
-            // =========================
             if (touchSide === "ABOVE" && distBps >= REBOUND_BPS) {
                 const next = prev >= 0 ? prev + 1 : 1;
                 detectorConfirm.set(k, next);
@@ -838,13 +1099,7 @@ async function processQuote({ bid, ask }) {
                         detectorTouchSide.delete(k);
                     }
                 }
-            }
-
-            // =========================
-            // REBOTE BAJISTA
-            // Llegó desde abajo, tocó, y vuelve a quedar abajo
-            // =========================
-            else if (touchSide === "BELOW" && distBps <= -REBOUND_BPS) {
+            } else if (touchSide === "BELOW" && distBps <= -REBOUND_BPS) {
                 const next = prev <= 0 ? prev - 1 : -1;
                 detectorConfirm.set(k, next);
 
@@ -865,26 +1120,17 @@ async function processQuote({ bid, ask }) {
                         detectorTouchSide.delete(k);
                     }
                 }
-            }
-
-            // =========================
-            // Si cruzó al lado contrario, eso parece más ruptura
-            // que rebote. Aquí lo invalidamos.
-            // =========================
-            else if (
+            } else if (
                 (touchSide === "ABOVE" && distBps <= -REBOUND_BPS) ||
                 (touchSide === "BELOW" && distBps >= REBOUND_BPS)
             ) {
                 detectorTouched.set(k, false);
                 detectorConfirm.set(k, 0);
                 detectorTouchSide.delete(k);
-            }
-
-            else {
+            } else {
                 detectorConfirm.set(k, 0);
             }
 
-            // invalidación por alejarse demasiado sin estructura clara
             if (absBps > 50) {
                 detectorTouched.set(k, false);
                 detectorConfirm.set(k, 0);
@@ -904,7 +1150,18 @@ function printLevels({ bid, ask }) {
     const ts = new Date().toISOString();
     const mid = (bid + ask) / 2;
 
-    console.log(`${ts} DRY_RUN=${DRY_RUN ? 1 : 0} BID=${bid} ASK=${ask} MID=${mid} openTrades=${openTrades.size} openingTrade=${openingTrade ? 1 : 0} locked=${lockedLevelKey || "-"}`);
+    console.log(
+        `${ts}` +
+        ` strategy=${STRATEGY_NAME}` +
+        ` service=${SERVICE_NAME}` +
+        ` DRY_RUN=${DRY_RUN ? 1 : 0}` +
+        ` BID=${bid}` +
+        ` ASK=${ask}` +
+        ` MID=${mid}` +
+        ` openTrades=${openTrades.size}` +
+        ` openingTrade=${openingTrade ? 1 : 0}` +
+        ` locked=${lockedLevelKey || "-"}`
+    );
 
     for (const p of pivotsList) {
         const { S1, S2, S3, R1, R2, R3 } = p.levels;
@@ -938,16 +1195,20 @@ function startWS() {
     });
 
     ws.on("message", async (raw) => {
-        const msg = JSON.parse(raw.toString());
-        const bid = Number(msg.b);
-        const ask = Number(msg.a);
-        if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+        try {
+            const msg = JSON.parse(raw.toString());
+            const bid = Number(msg.b);
+            const ask = Number(msg.a);
+            if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
 
-        lastBid = bid;
-        lastAsk = ask;
+            lastBid = bid;
+            lastAsk = ask;
 
-        printLevels({ bid, ask });
-        await processQuote({ bid, ask });
+            printLevels({ bid, ask });
+            await processQuote({ bid, ask });
+        } catch (e) {
+            console.error("❌ WS message error:", e.message);
+        }
     });
 
     ws.on("close", (code, reason) => {
