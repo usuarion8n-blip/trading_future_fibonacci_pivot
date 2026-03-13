@@ -26,6 +26,20 @@ function sign(queryString) {
     return crypto.createHmac("sha256", BINANCE_API_SECRET).update(queryString).digest("hex");
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 async function signedRequest(method, path, params = {}) {
     const timestamp = Date.now();
     const qs = new URLSearchParams({
@@ -37,8 +51,25 @@ async function signedRequest(method, path, params = {}) {
     const signature = sign(qs);
     const url = `${REST_BASE}${path}?${qs}&signature=${signature}`;
 
-    const res = await fetch(url, { method, headers: { "X-MBX-APIKEY": BINANCE_API_KEY } });
-    const text = await res.text();
+    let res;
+    let text;
+
+    try {
+        res = await fetchWithTimeout(
+            url,
+            { method, headers: { "X-MBX-APIKEY": BINANCE_API_KEY } },
+            10000
+        );
+        text = await res.text();
+    } catch (e) {
+        console.error("❌ signedRequest fetch error:", {
+            method,
+            path,
+            message: e?.message,
+            cause: e?.cause,
+        });
+        throw e;
+    }
 
     let json;
     try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -71,8 +102,20 @@ async function publicRequest(path, params = {}) {
     const qs = new URLSearchParams(params).toString();
     const url = `${REST_BASE}${path}${qs ? `?${qs}` : ""}`;
 
-    const res = await fetch(url);
-    const text = await res.text();
+    let res;
+    let text;
+
+    try {
+        res = await fetchWithTimeout(url, {}, 10000);
+        text = await res.text();
+    } catch (e) {
+        console.error("❌ publicRequest fetch error:", {
+            path,
+            message: e?.message,
+            cause: e?.cause,
+        });
+        throw e;
+    }
 
     let json;
     try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -274,14 +317,23 @@ function levelKey(baseDay, level) {
 }
 
 async function hasOpenTradeInDb() {
-    const { count, error } = await supabase
-        .from(TRADES_TABLE)
-        .select("*", { count: "exact", head: true })
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN");
+    try {
+        const { count, error } = await supabase
+            .from(TRADES_TABLE)
+            .select("*", { count: "exact", head: true })
+            .eq("symbol", SYMBOL_DB)
+            .eq("status", "OPEN");
 
-    if (error) throw error;
-    return (count || 0) > 0;
+        if (error) {
+            console.error("❌ hasOpenTradeInDb Supabase error:", error.message);
+            return true; // fail-safe: asumir que sí hay trade para no duplicar aperturas
+        }
+
+        return (count || 0) > 0;
+    } catch (e) {
+        console.error("❌ hasOpenTradeInDb fetch error:", e?.stack || e?.message || e);
+        return true; // fail-safe
+    }
 }
 
 function canOpenNewTrade() {
@@ -1195,19 +1247,27 @@ function startWS() {
     });
 
     ws.on("message", async (raw) => {
+        let bid, ask;
+
         try {
             const msg = JSON.parse(raw.toString());
-            const bid = Number(msg.b);
-            const ask = Number(msg.a);
+            bid = Number(msg.b);
+            ask = Number(msg.a);
             if (!Number.isFinite(bid) || !Number.isFinite(ask)) return;
+        } catch (e) {
+            console.error("❌ WS parse error:", e.message);
+            return;
+        }
 
-            lastBid = bid;
-            lastAsk = ask;
+        lastBid = bid;
+        lastAsk = ask;
 
-            printLevels({ bid, ask });
+        printLevels({ bid, ask });
+
+        try {
             await processQuote({ bid, ask });
         } catch (e) {
-            console.error("❌ WS message error:", e.message);
+            console.error("❌ processQuote error:", e?.stack || e?.message || e);
         }
     });
 
