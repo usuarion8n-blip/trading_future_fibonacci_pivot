@@ -6,7 +6,6 @@
  *   prevLevels  → day before yesterday
  */
 import { useState, useEffect } from 'react'
-import { supabase } from '../supabaseClient'
 
 function parseRow(row) {
     return {
@@ -31,13 +30,12 @@ export function useFibPivot() {
             setLoading(true)
             setError(null)
             try {
-                const { data, error: sbError } = await supabase
-                    .from('fib_pivot_daily')
-                    .select('pp, r1, r2, r3, s1, s2, s3')
-                    .order('run_ts', { ascending: false })
-                    .limit(2)
+                const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/api/pivots/recent?limit=2`)
+                const json = await res.json()
 
-                if (sbError) throw sbError
+                if (!json.success) throw new Error(json.message || 'Error fetching pivots')
+
+                const data = json.data
 
                 if (data && data.length >= 1) {
                     setLevels(parseRow(data[0]))

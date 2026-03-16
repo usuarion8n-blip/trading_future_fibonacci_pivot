@@ -133,91 +133,65 @@ export default function TradeHistory({ onBack }) {
 
     // Fetch distinct status values once on mount
     useEffect(() => {
-        supabase
-            .from('sim_trades')
-            .select('status')
-            .then(({ data }) => {
-                if (!data) return
-                const unique = ['ALL', ...new Set(data.map(r => r.status).filter(Boolean))]
+        fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/api/trades/statuses`)
+            .then(res => res.json())
+            .then(json => {
+                if (!json.success) return
+                const unique = ['ALL', ...json.data]
                 setStatuses(unique)
             })
+            .catch(err => console.error("Error fetching statuses:", err))
     }, [])
 
     const fetchTrades = useCallback(async (pageIndex, statusFilter, dFilter, nFilter) => {
         setLoading(true)
         setError(null)
 
-        const from = pageIndex * PAGE_SIZE
-        const to = from + PAGE_SIZE - 1
+        const params = new URLSearchParams()
+        if (pageIndex !== undefined) params.append('page', pageIndex.toString())
+        params.append('pageSize', PAGE_SIZE.toString())
+        
+        if (statusFilter !== 'ALL') params.append('status', statusFilter)
+        if (dFilter !== 'ALL') params.append('date', dFilter)
+        if (nFilter !== 'ALL') params.append('level', nFilter)
 
-        let query = supabase
-            .from('sim_trades')
-            .select('*', { count: 'exact' })
-            .order('entry_ts', { ascending: false })
-            .range(from, to)
+        try {
+            const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/api/trades?${params.toString()}`)
+            const json = await res.json()
 
-        if (statusFilter !== 'ALL') {
-            query = query.eq('status', statusFilter)
+            setLoading(false)
+            if (!json.success) { setError(json.message); return }
+
+            setTotal(json.count ?? 0)
+            setTrades(json.data ?? [])
+            setHasMore((json.data ?? []).length === PAGE_SIZE)
+        } catch (err) {
+            setLoading(false)
+            setError(err.message)
         }
-
-        if (dFilter !== 'ALL') {
-            const now = new Date()
-            if (dFilter === 'HOY') now.setHours(0, 0, 0, 0)
-            else if (dFilter === '1S') now.setDate(now.getDate() - 7)
-            else if (dFilter === '1M') now.setMonth(now.getMonth() - 1)
-            else if (dFilter === '1A') now.setFullYear(now.getFullYear() - 1)
-            query = query.gte('entry_ts', now.toISOString())
-        }
-
-        if (nFilter === 'VWAP') {
-            query = query.eq('level', 'VWAP')
-        } else if (nFilter === 'PIVOTS') {
-            query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
-        }
-
-        const { data, error: err, count } = await query
-
-        setLoading(false)
-        if (err) { setError(err.message); return }
-        if (count !== null) setTotal(count)
-        setTrades(data ?? [])
-        setHasMore((data ?? []).length === PAGE_SIZE)
     }, [])
 
     const fetchGlobalStats = useCallback(async (statusFilter, dFilter, nFilter) => {
-        let query = supabase
-            .from('sim_trades')
-            .select('id, status, pnl_usdt, meta')
-            .order('entry_ts', { ascending: true })
+        const params = new URLSearchParams()
+        if (statusFilter !== 'ALL') params.append('status', statusFilter)
+        if (dFilter !== 'ALL') params.append('date', dFilter)
+        if (nFilter !== 'ALL') params.append('level', nFilter)
 
-        if (statusFilter !== 'ALL') {
-            query = query.eq('status', statusFilter)
-        }
+        try {
+            const res = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:3000'}/api/trades/stats?${params.toString()}`)
+            const json = await res.json()
 
-        if (dFilter !== 'ALL') {
-            const now = new Date()
-            if (dFilter === 'HOY') now.setHours(0, 0, 0, 0)
-            else if (dFilter === '1S') now.setDate(now.getDate() - 7)
-            else if (dFilter === '1M') now.setMonth(now.getMonth() - 1)
-            else if (dFilter === '1A') now.setFullYear(now.getFullYear() - 1)
-            query = query.gte('entry_ts', now.toISOString())
-        }
-
-        if (nFilter === 'VWAP') {
-            query = query.eq('level', 'VWAP')
-        } else if (nFilter === 'PIVOTS') {
-            query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
-        }
-
-        const { data } = await query
-        if (data) {
-            let runningNet = 0;
-            const enhancedData = data.map(d => {
-                const net = d.meta?.net_pnl_usdt ?? 0;
-                runningNet += Number(net);
-                return { ...d, acc_net_pnl: runningNet };
-            });
-            setAllTradesStats(enhancedData)
+            if (json.success && json.data) {
+                let runningNet = 0;
+                const enhancedData = json.data.map(d => {
+                    const net = d.meta?.net_pnl_usdt ?? 0;
+                    runningNet += Number(net);
+                    return { ...d, acc_net_pnl: runningNet };
+                });
+                setAllTradesStats(enhancedData)
+            }
+        } catch (err) {
+            console.error("Error fetching stats:", err)
         }
     }, [])
 

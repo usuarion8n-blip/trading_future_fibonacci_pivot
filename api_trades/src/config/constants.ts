@@ -11,6 +11,7 @@ export const config = {
         password: process.env.DB_PASSWORD || 'postgres123',
         database: process.env.DB_NAME || 'mi_basedatos',
         tradesTable: process.env.TABLE_TRADES || 'sim_trades',
+        pivotsTable: process.env.TABLE_PIVOTS || 'fib_pivot_daily',
     },
     server: {
         port: process.env.PORT || 3000,

@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import tradesRouter from './routes/trades.js';
+import pivotsRouter from './routes/pivots.js';
 
 const app = express();
 
@@ -10,6 +11,7 @@ app.use(express.json());
 
 // Routes
 app.use('/api', tradesRouter);
+app.use('/api', pivotsRouter);
 
 // Basic health check route
 app.get('/health', (req, res) => {

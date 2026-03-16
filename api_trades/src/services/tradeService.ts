@@ -1,10 +1,84 @@
 import { query } from '../config/database.js';
 import { config } from '../config/constants.js';
 
+export interface TradeFilter {
+    status?: string;
+    dateFilter?: string; // 'HOY', '1S', '1M', '1A'
+    nivelFilter?: string; // 'VWAP', 'PIVOTS'
+    page?: number;
+    pageSize?: number;
+}
+
 export class TradeService {
-    static async getAllTrades() {
-        const sql = `SELECT * FROM ${config.db.tradesTable} ORDER BY entry_ts DESC`;
-        const result = await query(sql);
+
+    private static buildWhereClause(filters: TradeFilter) {
+        const conditions: string[] = [];
+        const params: any[] = [];
+        let paramIndex = 1;
+
+        if (filters.status && filters.status !== 'ALL') {
+            conditions.push(`status = $${paramIndex++}`);
+            params.push(filters.status);
+        }
+
+        if (filters.dateFilter && filters.dateFilter !== 'ALL') {
+            const now = new Date();
+            if (filters.dateFilter === 'HOY') now.setHours(0, 0, 0, 0);
+            else if (filters.dateFilter === '1S') now.setDate(now.getDate() - 7);
+            else if (filters.dateFilter === '1M') now.setMonth(now.getMonth() - 1);
+            else if (filters.dateFilter === '1A') now.setFullYear(now.getFullYear() - 1);
+
+            conditions.push(`entry_ts >= $${paramIndex++}`);
+            params.push(now.toISOString());
+        }
+
+        if (filters.nivelFilter && filters.nivelFilter !== 'ALL') {
+            if (filters.nivelFilter === 'VWAP') {
+                conditions.push(`level = $${paramIndex++}`);
+                params.push('VWAP');
+            } else if (filters.nivelFilter === 'PIVOTS') {
+                conditions.push(`level IN ('R1', 'R2', 'R3', 'S1', 'S2', 'S3')`);
+            }
+        }
+
+        const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+        return { whereClause, params, paramIndex };
+    }
+
+    static async getTrades(filters: TradeFilter = {}) {
+        let { whereClause, params, paramIndex } = this.buildWhereClause(filters);
+
+        let sql = `SELECT * FROM ${config.db.tradesTable} ${whereClause} ORDER BY entry_ts DESC`;
+
+        if (filters.page !== undefined && filters.pageSize !== undefined) {
+            const offset = filters.page * filters.pageSize;
+            sql += ` LIMIT $${paramIndex++} OFFSET $${paramIndex++}`;
+            params.push(filters.pageSize, offset);
+        }
+
+        // Get total count
+        const countSql = `SELECT COUNT(*) FROM ${config.db.tradesTable} ${whereClause}`;
+        const [result, countResult] = await Promise.all([
+            query(sql, params),
+            query(countSql, params.slice(0, filters.page !== undefined ? params.length - 2 : params.length))
+        ]);
+
+        return {
+            trades: result.rows,
+            totalCount: parseInt(countResult.rows[0].count, 10)
+        };
+    }
+
+    static async getStats(filters: TradeFilter = {}) {
+        const { whereClause, params } = this.buildWhereClause(filters);
+        const sql = `SELECT id, status, pnl_usdt, meta FROM ${config.db.tradesTable} ${whereClause} ORDER BY entry_ts ASC`;
+        const result = await query(sql, params);
         return result.rows;
+    }
+
+    static async getDistinctStatuses() {
+        const sql = `SELECT DISTINCT status FROM ${config.db.tradesTable} WHERE status IS NOT NULL`;
+        const result = await query(sql);
+        return result.rows.map(r => r.status);
     }
 }

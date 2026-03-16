@@ -1,22 +1,53 @@
 import { Request, Response } from 'express';
-import { TradeService } from '../services/tradeService.js';
+import { TradeService, TradeFilter } from '../services/tradeService.js';
 
 export class TradeController {
+    
+    // Parse common filters
+    private static parseFilters(req: Request): TradeFilter {
+        return {
+            status: req.query.status as string,
+            dateFilter: req.query.date as string,
+            nivelFilter: req.query.level as string,
+            page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
+            pageSize: req.query.pageSize ? parseInt(req.query.pageSize as string, 10) : undefined
+        };
+    }
+
     static async getTrades(req: Request, res: Response) {
         try {
-            const trades = await TradeService.getAllTrades();
+            const filters = TradeController.parseFilters(req);
+            const { trades, totalCount } = await TradeService.getTrades(filters);
+            
             res.json({
                 success: true,
-                count: trades.length,
+                count: totalCount,
                 data: trades
             });
         } catch (err: any) {
             console.error('Error fetching trades:', err);
-            res.status(500).json({
-                success: false,
-                message: 'Error fetching trades',
-                error: err.message
-            });
+            res.status(500).json({ success: false, message: 'Error fetching trades', error: err.message });
+        }
+    }
+
+    static async getStats(req: Request, res: Response) {
+        try {
+            const filters = TradeController.parseFilters(req);
+            const stats = await TradeService.getStats(filters);
+            res.json({ success: true, count: stats.length, data: stats });
+        } catch (err: any) {
+            console.error('Error fetching stats:', err);
+            res.status(500).json({ success: false, message: 'Error fetching stats', error: err.message });
+        }
+    }
+
+    static async getStatuses(req: Request, res: Response) {
+        try {
+            const statuses = await TradeService.getDistinctStatuses();
+            res.json({ success: true, data: statuses });
+        } catch (err: any) {
+            console.error('Error fetching statuses:', err);
+            res.status(500).json({ success: false, message: 'Error fetching statuses', error: err.message });
         }
     }
 }
