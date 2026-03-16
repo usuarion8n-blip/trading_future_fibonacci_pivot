@@ -74,7 +74,7 @@ body,
 .app {
     position: relative;
     z-index: 1;
-    max-width: 1200px;
+    max-width: 1600px;
     margin: 0 auto;
     padding: 0 20px 60px;
 }
@@ -796,7 +796,7 @@ body,
 .th-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 13px;
+    font-size: 12px;
 }
 
 .th-th {
@@ -805,14 +805,14 @@ body,
     z-index: 10;
     background: var(--bg-card-2);
     color: var(--text-muted);
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 600;
-    letter-spacing: 1px;
+    letter-spacing: 0.5px;
     text-transform: uppercase;
-    padding: 12px 16px;
+    padding: 8px 8px;
     text-align: left;
     border-bottom: 1px solid var(--border);
-    white-space: nowrap;
+    white-space: normal;
 }
 
 .th-tr {
@@ -829,7 +829,7 @@ body,
 }
 
 .th-td {
-    padding: 11px 16px;
+    padding: 8px 8px;
     color: var(--text-primary);
     white-space: nowrap;
     vertical-align: middle;
@@ -860,7 +860,7 @@ body,
 /* ─── Inline cell helpers ───────────────────────────────── */
 .th-mono {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 11px;
 }
 
 .th-muted {
@@ -885,7 +885,7 @@ body,
 
 .th-symbol {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 700;
     color: var(--gold);
 }
@@ -907,11 +907,11 @@ body,
 
 .th-badge {
     display: inline-block;
-    font-size: 10px;
+    font-size: 9px;
     font-weight: 700;
-    letter-spacing: .8px;
-    padding: 3px 9px;
-    border-radius: 5px;
+    letter-spacing: .5px;
+    padding: 2px 6px;
+    border-radius: 4px;
 }
 
 .th-side-long {
