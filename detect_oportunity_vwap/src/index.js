@@ -26,6 +26,20 @@ function sign(queryString) {
     return crypto.createHmac("sha256", BINANCE_API_SECRET).update(queryString).digest("hex");
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+        return await fetch(url, {
+            ...options,
+            signal: controller.signal,
+        });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
 async function signedRequest(method, path, params = {}) {
     const timestamp = Date.now();
     const qs = new URLSearchParams({
@@ -37,12 +51,25 @@ async function signedRequest(method, path, params = {}) {
     const signature = sign(qs);
     const url = `${REST_BASE}${path}?${qs}&signature=${signature}`;
 
-    const res = await fetch(url, {
-        method,
-        headers: { "X-MBX-APIKEY": BINANCE_API_KEY },
-    });
+    let res;
+    let text;
 
-    const text = await res.text();
+    try {
+        res = await fetchWithTimeout(
+            url,
+            { method, headers: { "X-MBX-APIKEY": BINANCE_API_KEY } },
+            10000
+        );
+        text = await res.text();
+    } catch (e) {
+        console.error("❌ signedRequest fetch error:", {
+            method,
+            path,
+            message: e?.message,
+            cause: e?.cause,
+        });
+        throw e;
+    }
 
     let json;
     try { json = JSON.parse(text); } catch { json = { raw: text }; }
@@ -60,7 +87,7 @@ async function placeConditionalAlgo({
         algoType: "CONDITIONAL",
         symbol,
         side,
-        type: orderType, // TAKE_PROFIT_MARKET | STOP_MARKET
+        type: orderType,
         triggerPrice: fmt(triggerPrice, priceDec),
         quantity: fmt(quantity, qtyDec),
         reduceOnly: "true",
@@ -161,6 +188,35 @@ function makeTradeGroupId() {
     return crypto.randomUUID();
 }
 
+// ======================
+// Helpers públicos
+// ======================
+async function publicRequest(path, params = {}) {
+    const qs = new URLSearchParams(params).toString();
+    const url = `${REST_BASE}${path}${qs ? `?${qs}` : ""}`;
+
+    let res;
+    let text;
+
+    try {
+        res = await fetchWithTimeout(url, {}, 10000);
+        text = await res.text();
+    } catch (e) {
+        console.error("❌ publicRequest fetch error:", {
+            path,
+            message: e?.message,
+            cause: e?.cause,
+        });
+        throw e;
+    }
+
+    let json;
+    try { json = JSON.parse(text); } catch { json = { raw: text }; }
+
+    if (!res.ok) throw new Error(`Binance HTTP ${res.status} ${res.statusText}: ${text}`);
+    return json;
+}
+
 async function loadSymbolFilters() {
     const info = await publicRequest("/fapi/v1/exchangeInfo", { symbol: SYMBOL_DB });
     const s = info?.symbols?.[0];
@@ -188,23 +244,6 @@ async function loadSymbolFilters() {
         strategy_name: STRATEGY_NAME,
         service_name: SERVICE_NAME,
     });
-}
-
-// ======================
-// Helpers públicos
-// ======================
-async function publicRequest(path, params = {}) {
-    const qs = new URLSearchParams(params).toString();
-    const url = `${REST_BASE}${path}${qs ? `?${qs}` : ""}`;
-
-    const res = await fetch(url);
-    const text = await res.text();
-
-    let json;
-    try { json = JSON.parse(text); } catch { json = { raw: text }; }
-
-    if (!res.ok) throw new Error(`Binance HTTP ${res.status} ${res.statusText}: ${text}`);
-    return json;
 }
 
 function bpsDistance(price, refPrice) {
@@ -245,14 +284,267 @@ let lastClosedKlineOpenTime = null;
 // Utils DB / locking
 // ======================
 async function hasOpenTradeInDb() {
-    const { count, error } = await supabase
+    try {
+        const { count, error } = await supabase
+            .from(TRADES_TABLE)
+            .select("*", { count: "exact", head: true })
+            .eq("symbol", SYMBOL_DB)
+            .eq("status", "OPEN");
+
+        if (error) {
+            console.error("❌ hasOpenTradeInDb Supabase error:", error.message);
+            return true;
+        }
+
+        return (count || 0) > 0;
+    } catch (e) {
+        console.error("❌ hasOpenTradeInDb fetch error:", e?.stack || e?.message || e);
+        return true;
+    }
+}
+
+function isUniqueOpenViolation(error) {
+    const msg = String(error?.message || "").toLowerCase();
+    return (
+        error?.code === "23505" ||
+        msg.includes("duplicate key") ||
+        msg.includes("unique") ||
+        msg.includes("uq_") ||
+        msg.includes("open")
+    );
+}
+
+async function getCurrentMetaForOpenTrade(id) {
+    const { data, error } = await supabase
         .from(TRADES_TABLE)
-        .select("*", { count: "exact", head: true })
+        .select("meta")
+        .eq("id", id)
+        .eq("symbol", SYMBOL_DB)
+        .single();
+
+    if (error) throw error;
+    return data?.meta || {};
+}
+
+async function reserveOpenTradeInDb({
+    side,
+    bid,
+    ask,
+    vwap,
+    distBps,
+    qtyAdj,
+    tradeGroupId,
+}) {
+    const entryTs = new Date().toISOString();
+
+    const row = {
+        symbol: SYMBOL_DB,
+        interval: INTERVAL,
+        strategy_name: STRATEGY_NAME,
+        service_name: SERVICE_NAME,
+        trade_group_id: tradeGroupId,
+        pivot_base_day: sessionDay,
+        level: "VWAP",
+        side,
+        entry_ts: entryTs,
+        entry_price: null,
+        entry_bid: bid,
+        entry_ask: ask,
+        tp_price: null,
+        sl_price: null,
+        status: "OPEN",
+        meta: {
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
+            trade_group_id: tradeGroupId,
+            source: "bookTicker+kline_1m",
+            strategy: "VWAP_AS_SUPPORT_RESISTANCE_REAL",
+            dry_run: false,
+            pivot_price: vwap,
+            previous_pivot_price: previousVWAP,
+            distance_bps_at_signal: Number(distBps.toFixed(2)),
+            tp_pct: TP_PCT,
+            sl_pct: SL_PCT,
+            qty_btc: qtyAdj,
+            touch_buffer_bps: TOUCH_BUFFER_BPS,
+            rebound_bps: REBOUND_BPS,
+            confirm_ticks: CONFIRM_TICKS,
+            session_day_utc: sessionDay,
+            detector_touch_side: detectorTouchSide,
+            trade_state: "RESERVED",
+            entry_order_id: null,
+            tp_algo_id: null,
+            sl_algo_id: null,
+            binance_entry_order: null,
+            binance_tp_order: null,
+            binance_sl_order: null,
+        },
+    };
+
+    const { data, error } = await supabase
+        .from(TRADES_TABLE)
+        .insert(row)
+        .select()
+        .single();
+
+    if (error) throw error;
+    return data;
+}
+
+async function finalizeReservedTradeInDb({
+    id,
+    entryPrice,
+    tpPrice,
+    slPrice,
+    entryOrder,
+    tpOrder,
+    slOrder,
+}) {
+    const currentMeta = await getCurrentMetaForOpenTrade(id);
+
+    const patch = {
+        entry_price: entryPrice,
+        tp_price: tpPrice,
+        sl_price: slPrice,
+        meta: {
+            ...currentMeta,
+            trade_state: "LIVE",
+            entry_order_id: entryOrder?.orderId ?? null,
+            tp_algo_id: tpOrder?.algoId ?? null,
+            sl_algo_id: slOrder?.algoId ?? null,
+            binance_entry_order: entryOrder,
+            binance_tp_order: tpOrder,
+            binance_sl_order: slOrder,
+        },
+    };
+
+    const { data, error } = await supabase
+        .from(TRADES_TABLE)
+        .update(patch)
+        .eq("id", id)
+        .eq("symbol", SYMBOL_DB)
+        .eq("status", "OPEN")
+        .select()
+        .single();
+
+    if (error) throw error;
+    return data;
+}
+
+async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
+    let currentMeta = {};
+    try {
+        currentMeta = await getCurrentMetaForOpenTrade(id);
+    } catch (e) {
+        console.error("❌ closeReservedTradeAsFailed read meta error:", e.message);
+        return;
+    }
+
+    const patch = {
+        status: "CLOSED",
+        exit_ts: new Date().toISOString(),
+        exit_reason: failureReason,
+        pnl_usdt: 0,
+        meta: {
+            ...currentMeta,
+            trade_state: "FAILED_BEFORE_LIVE",
+            failure_reason: failureReason,
+            ...extraMeta,
+        },
+    };
+
+    const { error } = await supabase
+        .from(TRADES_TABLE)
+        .update(patch)
+        .eq("id", id)
         .eq("symbol", SYMBOL_DB)
         .eq("status", "OPEN");
 
+    if (error) {
+        console.error("❌ closeReservedTradeAsFailed error:", error.message);
+    }
+}
+
+async function closeLiveTradeInDb({
+    id,
+    t,
+    exitTs,
+    exitPrice,
+    reason,
+    grossPnl,
+    feesUsdt,
+    netPnl,
+    entryFeesUsdt,
+    exitFeesUsdt,
+    entryPrice,
+    pnlQty,
+    realizedPnlBinance,
+    entryTrades,
+    exitTrades,
+    real,
+    tpAlgo,
+    slAlgo,
+}) {
+    const currentMeta = await getCurrentMetaForOpenTrade(id);
+
+    const patch = {
+        status: "CLOSED",
+        exit_ts: exitTs,
+        exit_price: exitPrice,
+        exit_reason: reason,
+        exit_bid: lastBid,
+        exit_ask: lastAsk,
+        pnl_usdt: Number(netPnl.toFixed(8)),
+        meta: {
+            ...currentMeta,
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
+            trade_group_id: t.tradeGroupId ?? currentMeta?.trade_group_id ?? null,
+
+            exit_reason: reason,
+            exit_price: exitPrice,
+            exit_ts: exitTs,
+            exit_bid: lastBid,
+            exit_ask: lastAsk,
+
+            gross_pnl_usdt: Number(grossPnl.toFixed(8)),
+            fees_usdt: Number(feesUsdt.toFixed(8)),
+            net_pnl_usdt: Number(netPnl.toFixed(8)),
+            pnl_usdt: Number(netPnl.toFixed(8)),
+
+            entry_fees_usdt: Number(entryFeesUsdt.toFixed(8)),
+            exit_fees_usdt: Number(exitFeesUsdt.toFixed(8)),
+            entry_price_effective: Number(entryPrice.toFixed(8)),
+            exit_price_effective: Number(exitPrice.toFixed(8)),
+            qty_closed_btc: Number(pnlQty.toFixed(8)),
+            realized_pnl_binance_usdt: Number(realizedPnlBinance.toFixed(8)),
+
+            entry_trades_count: entryTrades.length,
+            exit_trades_count: exitTrades.length,
+            binance_entry_trades: entryTrades,
+            binance_exit_trades: exitTrades,
+
+            binance_exit_order: real,
+            binance_exit_order_id: real?.orderId,
+            binance_exit_update_time: real?.updateTime,
+            binance_tp_algo: tpAlgo,
+            binance_sl_algo: slAlgo,
+        },
+    };
+
+    const { error } = await supabase
+        .from(TRADES_TABLE)
+        .update(patch)
+        .eq("id", id)
+        .eq("symbol", SYMBOL_DB)
+        .eq("strategy_name", STRATEGY_NAME)
+        .eq("service_name", SERVICE_NAME);
+
     if (error) throw error;
-    return (count || 0) > 0;
+}
+
+function canOpenNewTrade() {
+    return openTrades.size < MAX_OPEN_TRADES;
 }
 
 // ======================
@@ -338,7 +630,7 @@ function recalcVWAP() {
 // ======================
 let detectorTouched = false;
 let detectorConfirm = 0;
-let detectorTouchSide = null; // ABOVE | BELOW
+let detectorTouchSide = null;
 
 function resetVWAPSessionIfNeeded() {
     const today = getUtcDayStr();
@@ -398,21 +690,12 @@ const openTrades = new Map();
 let openingTrade = false;
 const lastSignalAt = new Map();
 
-function canOpenNewTrade() {
-    return openTrades.size < MAX_OPEN_TRADES;
-}
-
 // ======================
 // REAL OPEN + TP/SL
 // ======================
 async function openTradeReal({ side, bid, ask, vwap, distBps }) {
     if (openingTrade) {
         console.log("⏳ openTradeReal skipped: ya hay una apertura en curso");
-        return null;
-    }
-
-    if (await hasOpenTradeInDb()) {
-        console.log("⛔ Ya existe un trade OPEN en BD para este símbolo");
         return null;
     }
 
@@ -436,13 +719,77 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
             return null;
         }
 
-        const entrySide = side === "LONG" ? "BUY" : "SELL";
-        const closeSide = side === "LONG" ? "SELL" : "BUY";
+        const tradeGroupId = makeTradeGroupId();
 
-        if (DRY_RUN) {
-            console.log("🧪 DRY_RUN openTradeReal", { side, level: "VWAP", qtyAdj });
+        let reservedTrade;
+        try {
+            reservedTrade = await reserveOpenTradeInDb({
+                side,
+                bid,
+                ask,
+                vwap,
+                distBps,
+                qtyAdj,
+                tradeGroupId,
+            });
+        } catch (e) {
+            if (isUniqueOpenViolation(e)) {
+                console.log("⛔ Otro servicio ya reservó un OPEN para este símbolo. No opero.", {
+                    symbol: SYMBOL_DB,
+                    strategy_name: STRATEGY_NAME,
+                    service_name: SERVICE_NAME,
+                });
+                return null;
+            }
+
+            console.error("❌ No pude reservar OPEN en Supabase. No opero en Binance.", {
+                symbol: SYMBOL_DB,
+                strategy_name: STRATEGY_NAME,
+                service_name: SERVICE_NAME,
+                error: e?.message || e,
+            });
             return null;
         }
+
+        lastSignalAt.set(cdKey, nowMs);
+
+        if (DRY_RUN) {
+            openTrades.set(reservedTrade.id, {
+                id: reservedTrade.id,
+                strategyName: STRATEGY_NAME,
+                serviceName: SERVICE_NAME,
+                tradeGroupId,
+                side,
+                level: "VWAP",
+                entryPrice: null,
+                tpPrice: null,
+                slPrice: null,
+                entryTs: reservedTrade.entry_ts,
+                qty: qtyAdj,
+                meta: reservedTrade.meta || {},
+                sessionDay,
+                entryOrderId: null,
+                tpAlgoId: null,
+                slAlgoId: null,
+            });
+
+            detectorTouched = false;
+            detectorConfirm = 0;
+            detectorTouchSide = null;
+
+            console.log("🧪 DRY_RUN RESERVED TRADE", {
+                id: reservedTrade.id,
+                symbol: SYMBOL_DB,
+                side,
+                level: "VWAP",
+                qty: qtyAdj,
+            });
+
+            return reservedTrade.id;
+        }
+
+        const entrySide = side === "LONG" ? "BUY" : "SELL";
+        const closeSide = side === "LONG" ? "SELL" : "BUY";
 
         let entryOrder;
         try {
@@ -454,7 +801,12 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 newOrderRespType: "RESULT",
             });
         } catch (e) {
-            console.error("❌ Entry order failed:", e.message);
+            console.error("❌ Entry order failed after Supabase reservation:", e.message);
+
+            await closeReservedTradeAsFailed(reservedTrade.id, "ENTRY_ORDER_FAILED", {
+                entry_error: e.message,
+            });
+
             return null;
         }
 
@@ -462,9 +814,6 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
         if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
             entryPrice = Number(side === "LONG" ? ask : bid);
         }
-
-        const entryTs = new Date().toISOString();
-        const tradeGroupId = makeTradeGroupId();
 
         const tpDelta = entryPrice * TP_PCT;
         const slDelta = entryPrice * SL_PCT;
@@ -501,7 +850,7 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 qtyDec,
             });
         } catch (e) {
-            console.error("❌ TP/SL failed, emergency close:", e.message);
+            console.error("❌ TP/SL failed after Binance entry:", e.message);
 
             try {
                 await signedRequest("POST", "/fapi/v1/order", {
@@ -516,69 +865,34 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
             } catch (e2) {
                 console.error("🧨 Emergency close FAILED:", e2.message);
             }
+
+            await closeReservedTradeAsFailed(reservedTrade.id, "TP_SL_CREATION_FAILED", {
+                entry_order_id: entryOrder?.orderId ?? null,
+                tp_sl_error: e.message,
+            });
+
             return null;
         }
 
-        const row = {
-            symbol: SYMBOL_DB,
-            interval: INTERVAL,
-            strategy_name: STRATEGY_NAME,
-            service_name: SERVICE_NAME,
-            trade_group_id: tradeGroupId,
-            pivot_base_day: sessionDay,
-            level: "VWAP",
-            side,
-            entry_ts: entryTs,
-            entry_price: entryPrice,
-            entry_bid: bid,
-            entry_ask: ask,
-            tp_price: tpPrice,
-            sl_price: slPrice,
-            status: "OPEN",
-            meta: {
-                strategy_name: STRATEGY_NAME,
-                service_name: SERVICE_NAME,
-                trade_group_id: tradeGroupId,
-                source: "bookTicker+kline_1m",
-                strategy: "VWAP_AS_SUPPORT_RESISTANCE_REAL",
-                dry_run: false,
-                pivot_price: vwap,
-                previous_pivot_price: previousVWAP,
-                distance_bps_at_signal: Number(distBps.toFixed(2)),
-                tp_pct: TP_PCT,
-                sl_pct: SL_PCT,
-                qty_btc: qtyAdj,
-                touch_buffer_bps: TOUCH_BUFFER_BPS,
-                rebound_bps: REBOUND_BPS,
-                confirm_ticks: CONFIRM_TICKS,
-                session_day_utc: sessionDay,
-                detector_touch_side: detectorTouchSide,
-                entry_order_id: entryOrder?.orderId ?? null,
-                tp_algo_id: tpOrder?.algoId ?? null,
-                sl_algo_id: slOrder?.algoId ?? null,
-                binance_entry_order: entryOrder,
-                binance_tp_order: tpOrder,
-                binance_sl_order: slOrder,
-            },
-        };
-
         let data;
         try {
-            const res = await supabase.from(TRADES_TABLE).insert(row).select().single();
-
-            if (res.error) {
-                throw res.error;
-            }
-
-            data = res.data;
+            data = await finalizeReservedTradeInDb({
+                id: reservedTrade.id,
+                entryPrice,
+                tpPrice,
+                slPrice,
+                entryOrder,
+                tpOrder,
+                slOrder,
+            });
         } catch (e) {
-            console.error("❌ Supabase insert failed AFTER Binance entry. Sending emergency close:", e.message);
+            console.error("❌ No pude finalizar trade OPEN en Supabase después de Binance:", e.message);
 
             await cancelAlgoSafe(tpOrder?.algoId ?? null);
             await cancelAlgoSafe(slOrder?.algoId ?? null);
 
             try {
-                const emergencyClose = await signedRequest("POST", "/fapi/v1/order", {
+                await signedRequest("POST", "/fapi/v1/order", {
                     symbol: SYMBOL_DB,
                     side: closeSide,
                     type: "MARKET",
@@ -586,26 +900,20 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                     quantity: fmt(qtyAdj, qtyDec),
                     newOrderRespType: "RESULT",
                 });
-
-                console.error("🧯 Emergency close sent after DB insert failure.", {
-                    entryOrderId: entryOrder?.orderId ?? null,
-                    emergencyCloseOrderId: emergencyClose?.orderId ?? null,
-                    strategy_name: STRATEGY_NAME,
-                    service_name: SERVICE_NAME,
-                });
+                console.error("🧯 Emergency close sent after finalize failure.");
             } catch (e2) {
-                console.error("🧨 Emergency close FAILED after DB insert failure:", {
-                    error: e2.message,
-                    entryOrderId: entryOrder?.orderId ?? null,
-                    strategy_name: STRATEGY_NAME,
-                    service_name: SERVICE_NAME,
-                });
+                console.error("🧨 Emergency close FAILED after finalize failure:", e2.message);
             }
+
+            await closeReservedTradeAsFailed(reservedTrade.id, "FINALIZE_DB_FAILED", {
+                entry_order_id: entryOrder?.orderId ?? null,
+                tp_algo_id: tpOrder?.algoId ?? null,
+                sl_algo_id: slOrder?.algoId ?? null,
+                finalize_error: e.message,
+            });
 
             return null;
         }
-
-        lastSignalAt.set(cdKey, nowMs);
 
         openTrades.set(data.id, {
             id: data.id,
@@ -617,9 +925,9 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
             entryPrice,
             tpPrice,
             slPrice,
-            entryTs,
+            entryTs: data.entry_ts,
             qty: qtyAdj,
-            meta: row.meta,
+            meta: data.meta || {},
             sessionDay,
             entryOrderId: entryOrder?.orderId ?? null,
             tpAlgoId: tpOrder?.algoId ?? null,
@@ -850,9 +1158,6 @@ async function reconcileOpenTrades() {
             let entryTrades = [];
             let exitTrades = [];
 
-            // =========================
-            // A) Intento normal vía algoOrder
-            // =========================
             try {
                 const tpAlgoRaw = t.tpAlgoId ? await getAlgoStatus(t.tpAlgoId) : null;
                 const slAlgoRaw = t.slAlgoId ? await getAlgoStatus(t.slAlgoId) : null;
@@ -878,9 +1183,6 @@ async function reconcileOpenTrades() {
                 console.error("⚠️ normal algo reconcile failed, using fallback:", e.message);
             }
 
-            // =========================
-            // B) Fallback por posición real en Binance
-            // =========================
             if (!triggeredOrderId) {
                 const positionRisk = await getPositionRisk(SYMBOL_DB);
                 const flat = isPositionFlat(positionRisk);
@@ -936,15 +1238,9 @@ async function reconcileOpenTrades() {
                     : [];
             }
 
-            // =========================
-            // C) Cancelar algo opuesto solo si fue cierre normal TP/SL
-            // =========================
             if (reason === "TP") await cancelAlgoSafe(t.slAlgoId);
             if (reason === "SL") await cancelAlgoSafe(t.tpAlgoId);
 
-            // =========================
-            // D) Calcular precios / qty / fees / pnl
-            // =========================
             let entryPrice = weightedAveragePrice(entryTrades, t.entryPrice);
             if (!Number.isFinite(entryPrice) || entryPrice <= 0) {
                 entryPrice = Number(t.entryPrice);
@@ -976,64 +1272,29 @@ async function reconcileOpenTrades() {
             const netPnl = grossPnl - feesUsdt;
             const realizedPnlBinance = sumRealizedPnl(exitTrades);
 
-            // =========================
-            // E) Update Supabase
-            // =========================
-            const patch = {
-                status: "CLOSED",
-                exit_ts: exitTs,
-                exit_price: exitPrice,
-                exit_reason: reason,
-                exit_bid: lastBid,
-                exit_ask: lastAsk,
-                pnl_usdt: Number(netPnl.toFixed(8)),
-                meta: {
-                    ...(t.meta || {}),
-                    strategy_name: STRATEGY_NAME,
-                    service_name: SERVICE_NAME,
-                    trade_group_id: t.tradeGroupId ?? t.meta?.trade_group_id ?? null,
-
-                    exit_reason: reason,
-                    exit_price: exitPrice,
-                    exit_ts: exitTs,
-                    exit_bid: lastBid,
-                    exit_ask: lastAsk,
-
-                    gross_pnl_usdt: Number(grossPnl.toFixed(8)),
-                    fees_usdt: Number(feesUsdt.toFixed(8)),
-                    net_pnl_usdt: Number(netPnl.toFixed(8)),
-                    pnl_usdt: Number(netPnl.toFixed(8)),
-
-                    entry_fees_usdt: Number(entryFeesUsdt.toFixed(8)),
-                    exit_fees_usdt: Number(exitFeesUsdt.toFixed(8)),
-                    entry_price_effective: Number(entryPrice.toFixed(8)),
-                    exit_price_effective: Number(exitPrice.toFixed(8)),
-                    qty_closed_btc: Number(pnlQty.toFixed(8)),
-                    realized_pnl_binance_usdt: Number(realizedPnlBinance.toFixed(8)),
-
-                    entry_trades_count: entryTrades.length,
-                    exit_trades_count: exitTrades.length,
-                    binance_entry_trades: entryTrades,
-                    binance_exit_trades: exitTrades,
-
-                    binance_exit_order: real,
-                    binance_exit_order_id: real?.orderId,
-                    binance_exit_update_time: real?.updateTime,
-                    binance_tp_algo: tpAlgo,
-                    binance_sl_algo: slAlgo,
-                },
-            };
-
-            const { error } = await supabase
-                .from(TRADES_TABLE)
-                .update(patch)
-                .eq("id", id)
-                .eq("symbol", SYMBOL_DB)
-                .eq("strategy_name", STRATEGY_NAME)
-                .eq("service_name", SERVICE_NAME);
-
-            if (error) {
-                console.error("❌ Supabase close update failed:", error.message);
+            try {
+                await closeLiveTradeInDb({
+                    id,
+                    t,
+                    exitTs,
+                    exitPrice,
+                    reason,
+                    grossPnl,
+                    feesUsdt,
+                    netPnl,
+                    entryFeesUsdt,
+                    exitFeesUsdt,
+                    entryPrice,
+                    pnlQty,
+                    realizedPnlBinance,
+                    entryTrades,
+                    exitTrades,
+                    real,
+                    tpAlgo,
+                    slAlgo,
+                });
+            } catch (e) {
+                console.error("❌ Supabase close update failed:", e.message);
                 continue;
             }
 
