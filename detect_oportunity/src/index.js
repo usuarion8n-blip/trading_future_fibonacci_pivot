@@ -567,6 +567,13 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
                 tradeGroupId,
             });
         } catch (e) {
+            // Apply cooldown and clear detector even if DB fails, to prevent infinite loops
+            lastSignalAt.set(cdKey, nowMs);
+            detectorTouched.clear();
+            detectorConfirm.clear();
+            detectorTouchSide.clear();
+
+
             if (isUniqueOpenViolation(e)) {
                 console.log("⛔ Otro servicio ya reservó un OPEN para este símbolo. No opero.", {
                     symbol: SYMBOL_DB,
@@ -1161,7 +1168,7 @@ async function reconcileOpenTrades() {
                     gross_pnl_usdt: Number(grossPnl.toFixed(8)),
                     fees_usdt: Number(feesUsdt.toFixed(8)),
                     net_pnl_usdt: Number(netPnl.toFixed(8)),
-                    pnl_usdt: Number(netPnl.toFixed(8)),
+                    pnl_usdt: Number(grossPnl.toFixed(8)),
 
                     entry_fees_usdt: Number(entryFeesUsdt.toFixed(8)),
                     exit_fees_usdt: Number(exitFeesUsdt.toFixed(8)),
