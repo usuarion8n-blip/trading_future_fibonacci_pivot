@@ -26,11 +26,13 @@ yarn-error.log*
 pnpm-debug.log*
 
 # ==========================
-# Build / Dist (front_market con Vite)
+# Build / Dist (front_market, api_trades, etc)
 # ==========================
 dist/
 build/
 .vite/
+api_trades/dist/
+api_trades/build/
 
 # ==========================
 # Caché y archivos temporales
