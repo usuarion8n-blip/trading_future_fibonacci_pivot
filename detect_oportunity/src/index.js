@@ -415,11 +415,26 @@ async function finalizeReservedTradeInDb({
     tpOrder,
     slOrder,
 }) {
+    // 1) Leer meta actual para no perderlo
+    const { data: currentRow, error: readError } = await supabase
+        .from(TRADES_TABLE)
+        .select("meta")
+        .eq("id", id)
+        .eq("symbol", SYMBOL_DB)
+        .eq("status", "OPEN")
+        .single();
+
+    if (readError) throw readError;
+
+    const currentMeta = currentRow?.meta || {};
+
+    // 2) Merge del meta anterior + nuevos campos
     const patch = {
         entry_price: entryPrice,
         tp_price: tpPrice,
         sl_price: slPrice,
         meta: {
+            ...currentMeta,
             trade_state: "LIVE",
             entry_order_id: entryOrder?.orderId ?? null,
             tp_algo_id: tpOrder?.algoId ?? null,
@@ -444,12 +459,30 @@ async function finalizeReservedTradeInDb({
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
+    // 1) Leer meta actual para no perderlo
+    const { data: currentRow, error: readError } = await supabase
+        .from(TRADES_TABLE)
+        .select("meta")
+        .eq("id", id)
+        .eq("symbol", SYMBOL_DB)
+        .eq("status", "OPEN")
+        .single();
+
+    if (readError) {
+        console.error("❌ closeReservedTradeAsFailed read meta error:", readError.message);
+        return;
+    }
+
+    const currentMeta = currentRow?.meta || {};
+
+    // 2) Merge del meta anterior + estado de fallo
     const patch = {
         status: "CLOSED",
         exit_ts: new Date().toISOString(),
         exit_reason: failureReason,
         pnl_usdt: 0,
         meta: {
+            ...currentMeta,
             trade_state: "FAILED_BEFORE_LIVE",
             failure_reason: failureReason,
             ...extraMeta,

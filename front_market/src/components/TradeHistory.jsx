@@ -170,7 +170,7 @@ export default function TradeHistory({ onBack }) {
         }
 
         if (nFilter === 'VWAP') {
-            query = query.eq('level', 'vwap')
+            query = query.eq('level', 'VWAP')
         } else if (nFilter === 'PIVOTS') {
             query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
         }
@@ -204,7 +204,7 @@ export default function TradeHistory({ onBack }) {
         }
 
         if (nFilter === 'VWAP') {
-            query = query.eq('level', 'vwap')
+            query = query.eq('level', 'VWAP')
         } else if (nFilter === 'PIVOTS') {
             query = query.in('level', ['R1', 'R2', 'R3', 'S1', 'S2', 'S3'])
         }
