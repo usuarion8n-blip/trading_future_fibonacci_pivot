@@ -131,6 +131,9 @@ const REBOUND_BPS = Number(process.env.REBOUND_BPS ?? 6);
 const CONFIRM_TICKS = Number(process.env.CONFIRM_TICKS ?? 3);
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS ?? (2 * 60_000));
 
+// NUEVO: bloqueo temporal del nivel VWAP
+const VWAP_LEVEL_BLOCK_MS = Number(process.env.VWAP_LEVEL_BLOCK_MS ?? (30 * 60_000));
+
 // Gestión de trade
 const TP_PCT = Number(process.env.TP_PCT ?? 0.0015);
 const SL_PCT = Number(process.env.SL_PCT ?? 0.0015);
@@ -243,6 +246,7 @@ async function loadSymbolFilters() {
         minQty: MIN_QTY,
         strategy_name: STRATEGY_NAME,
         service_name: SERVICE_NAME,
+        vwap_level_block_ms: VWAP_LEVEL_BLOCK_MS,
     });
 }
 
@@ -279,6 +283,70 @@ let lastBid = null;
 let lastAsk = null;
 
 let lastClosedKlineOpenTime = null;
+
+// ======================
+// NUEVO: lock temporal del VWAP
+// ======================
+let vwapLockedUntil = 0;
+
+function setVwapLevelLock(fromTs = Date.now()) {
+    vwapLockedUntil = Math.max(vwapLockedUntil, fromTs + VWAP_LEVEL_BLOCK_MS);
+
+    console.log("🔒 VWAP level locked until:", {
+        locked_until_iso: new Date(vwapLockedUntil).toISOString(),
+        lock_ms: VWAP_LEVEL_BLOCK_MS,
+    });
+}
+
+function clearDetectorState() {
+    detectorTouched = false;
+    detectorConfirm = 0;
+    detectorTouchSide = null;
+}
+
+function isVwapLevelLocked(now = Date.now()) {
+    return now < vwapLockedUntil;
+}
+
+function getVwapLockRemainingMs(now = Date.now()) {
+    return Math.max(0, vwapLockedUntil - now);
+}
+
+async function restoreVwapLevelLock() {
+    try {
+        const { data, error } = await supabase
+            .from(TRADES_TABLE)
+            .select("entry_ts, status, level, strategy_name, service_name")
+            .eq("symbol", SYMBOL_DB)
+            .eq("strategy_name", STRATEGY_NAME)
+            .eq("level", "VWAP")
+            .order("entry_ts", { ascending: false })
+            .limit(1);
+
+        if (error) {
+            console.error("❌ restoreVwapLevelLock error:", error.message);
+            return;
+        }
+
+        const row = data?.[0];
+        if (!row?.entry_ts) return;
+
+        const entryMs = new Date(row.entry_ts).getTime();
+        if (!Number.isFinite(entryMs)) return;
+
+        const lockedUntil = entryMs + VWAP_LEVEL_BLOCK_MS;
+
+        if (lockedUntil > Date.now()) {
+            vwapLockedUntil = lockedUntil;
+            console.log("♻️ VWAP lock restored:", {
+                locked_until_iso: new Date(vwapLockedUntil).toISOString(),
+                remaining_ms: getVwapLockRemainingMs(),
+            });
+        }
+    } catch (e) {
+        console.error("❌ restoreVwapLevelLock fetch error:", e?.message || e);
+    }
+}
 
 // ======================
 // Utils DB / locking
@@ -642,9 +710,7 @@ function resetVWAPSessionIfNeeded() {
         currentVWAP = null;
         previousVWAP = null;
 
-        detectorTouched = false;
-        detectorConfirm = 0;
-        detectorTouchSide = null;
+        clearDetectorState();
         lastClosedKlineOpenTime = null;
 
         console.log("🔄 Nueva sesión UTC. Reiniciando VWAP...");
@@ -696,6 +762,10 @@ const lastSignalAt = new Map();
 async function openTradeReal({ side, bid, ask, vwap, distBps }) {
     if (openingTrade) {
         console.log("⏳ openTradeReal skipped: ya hay una apertura en curso");
+        return null;
+    }
+
+    if (isVwapLevelLocked()) {
         return null;
     }
 
@@ -773,9 +843,8 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 slAlgoId: null,
             });
 
-            detectorTouched = false;
-            detectorConfirm = 0;
-            detectorTouchSide = null;
+            setVwapLevelLock(nowMs);
+            clearDetectorState();
 
             console.log("🧪 DRY_RUN RESERVED TRADE", {
                 id: reservedTrade.id,
@@ -934,9 +1003,8 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
             slAlgoId: slOrder?.algoId ?? null,
         });
 
-        detectorTouched = false;
-        detectorConfirm = 0;
-        detectorTouchSide = null;
+        setVwapLevelLock(nowMs);
+        clearDetectorState();
 
         console.log("✅ REAL TRADE OPENED", {
             id: data.id,
@@ -1404,6 +1472,11 @@ async function restoreOpenTrades() {
 async function processQuote({ bid, ask }) {
     if (!Number.isFinite(currentVWAP)) return;
 
+    if (isVwapLevelLocked()) {
+        clearDetectorState();
+        return;
+    }
+
     const levelPrice = currentVWAP;
     const midPrice = (bid + ask) / 2;
 
@@ -1435,9 +1508,7 @@ async function processQuote({ bid, ask }) {
                 });
 
                 if (openedId) {
-                    detectorTouched = false;
-                    detectorConfirm = 0;
-                    detectorTouchSide = null;
+                    clearDetectorState();
                 }
             }
         } else if (touchSide === "BELOW" && distBps <= -REBOUND_BPS) {
@@ -1454,26 +1525,20 @@ async function processQuote({ bid, ask }) {
                 });
 
                 if (openedId) {
-                    detectorTouched = false;
-                    detectorConfirm = 0;
-                    detectorTouchSide = null;
+                    clearDetectorState();
                 }
             }
         } else if (
             (touchSide === "ABOVE" && distBps <= -REBOUND_BPS) ||
             (touchSide === "BELOW" && distBps >= REBOUND_BPS)
         ) {
-            detectorTouched = false;
-            detectorConfirm = 0;
-            detectorTouchSide = null;
+            clearDetectorState();
         } else {
             detectorConfirm = 0;
         }
 
         if (absBps > 50) {
-            detectorTouched = false;
-            detectorConfirm = 0;
-            detectorTouchSide = null;
+            clearDetectorState();
         }
     }
 }
@@ -1488,6 +1553,7 @@ function printStatus({ bid, ask }) {
     const ts = new Date().toISOString();
     const mid = (bid + ask) / 2;
     const dist = Number.isFinite(currentVWAP) ? bpsDistance(mid, currentVWAP) : null;
+    const lockRemainingMs = getVwapLockRemainingMs(now);
 
     console.log(
         `${ts}` +
@@ -1504,7 +1570,9 @@ function printStatus({ bid, ask }) {
         ` touchSide=${detectorTouchSide || "-"}` +
         ` confirm=${detectorConfirm}` +
         ` openTrades=${openTrades.size}` +
-        ` openingTrade=${openingTrade ? 1 : 0}`
+        ` openingTrade=${openingTrade ? 1 : 0}` +
+        ` vwapLocked=${isVwapLevelLocked(now) ? 1 : 0}` +
+        ` vwapLockRemainingMs=${lockRemainingMs}`
     );
 }
 
@@ -1580,6 +1648,7 @@ function startWS() {
 await loadSymbolFilters();
 await loadInitialVWAPState();
 await restoreOpenTrades();
+await restoreVwapLevelLock();
 
 setInterval(reconcileOpenTrades, RECONCILE_EVERY_MS);
 
