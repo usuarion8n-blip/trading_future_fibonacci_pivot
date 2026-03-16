@@ -1,20 +1,4 @@
 services:
-  listening_service:
-    image: aeor06/trading_future:listening_service
-    build:
-      context: ./listening_service
-    env_file:
-      - ./listening_service/.env
-    environment:
-      TZ: "UTC"
-      CRON_SCHEDULE: "5 0 * * *"
-      CRON_COMMAND: "node src/index.js"
-    restart: unless-stopped
-    networks: [ trading_net ]
-    logging:
-      options:
-        max-size: "10m"
-        max-file: "5"
 
   detect_opportunity:
     image: aeor06/trading_future:detect_opportunity
@@ -23,7 +7,6 @@ services:
     env_file:
       - ./detect_oportunity/.env
     restart: unless-stopped
-    depends_on: [ listening_service ]
     networks: [ trading_net ]
     logging:
       options:
@@ -37,7 +20,6 @@ services:
     env_file:
       - ./detect_oportunity_vwap/.env
     restart: unless-stopped
-    depends_on: [ listening_service ]
     networks: [ trading_net ]
     logging:
       options:
