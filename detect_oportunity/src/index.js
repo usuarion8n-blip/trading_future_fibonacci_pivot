@@ -1145,7 +1145,7 @@ async function reconcileOpenTrades() {
                 exit_reason: reason,
                 exit_bid: lastBid,
                 exit_ask: lastAsk,
-                pnl_usdt: Number(netPnl.toFixed(8)),
+                pnl_usdt: Number(grossPnl.toFixed(8)),
                 meta: {
                     ...(t.meta || {}),
                     strategy_name: STRATEGY_NAME,

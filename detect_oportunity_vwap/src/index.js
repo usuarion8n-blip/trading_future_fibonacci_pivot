@@ -494,7 +494,7 @@ async function closeLiveTradeInDb({
         exit_reason: reason,
         exit_bid: lastBid,
         exit_ask: lastAsk,
-        pnl_usdt: Number(netPnl.toFixed(8)),
+        pnl_usdt: Number(grossPnl.toFixed(8)),
         meta: {
             ...currentMeta,
             strategy_name: STRATEGY_NAME,
