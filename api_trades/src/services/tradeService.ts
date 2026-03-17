@@ -81,4 +81,28 @@ export class TradeService {
         const result = await query(sql);
         return result.rows.map(r => r.status);
     }
+
+    static async createTrade(tradeData: any) {
+        const columns = Object.keys(tradeData);
+        const values = Object.values(tradeData);
+
+        const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
+        const sql = `INSERT INTO ${config.db.tradesTable} (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`;
+
+        const result = await query(sql, values);
+        return result.rows[0];
+    }
+
+    static async updateTrade(id: string | number, updateData: any) {
+        const columns = Object.keys(updateData);
+        const values = Object.values(updateData);
+
+        if (columns.length === 0) return null;
+
+        const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(', ');
+        const sql = `UPDATE ${config.db.tradesTable} SET ${setClause} WHERE id = $${values.length + 1} RETURNING *`;
+
+        const result = await query(sql, [...values, id]);
+        return result.rows[0];
+    }
 }

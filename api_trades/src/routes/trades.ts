@@ -6,5 +6,7 @@ const router = Router();
 router.get('/trades/statuses', TradeController.getStatuses);
 router.get('/trades/stats', TradeController.getStats);
 router.get('/trades', TradeController.getTrades);
+router.post('/trades', TradeController.createTrade);
+router.put('/trades/:id', TradeController.updateTrade);
 
 export default router;

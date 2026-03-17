@@ -50,4 +50,32 @@ export class TradeController {
             res.status(500).json({ success: false, message: 'Error fetching statuses', error: err.message });
         }
     }
+
+    static async createTrade(req: Request, res: Response) {
+        try {
+            const tradeData = req.body;
+            const newTrade = await TradeService.createTrade(tradeData);
+            res.status(201).json({ success: true, data: newTrade });
+        } catch (err: any) {
+            console.error('Error creating trade:', err);
+            res.status(500).json({ success: false, message: 'Error creating trade', error: err.message });
+        }
+    }
+
+    static async updateTrade(req: Request, res: Response) {
+        try {
+            const id = req.params.id as string;
+            const updateData = req.body;
+            const updatedTrade = await TradeService.updateTrade(id, updateData);
+            
+            if (!updatedTrade) {
+                return res.status(404).json({ success: false, message: 'Trade not found' });
+            }
+            
+            res.json({ success: true, data: updatedTrade });
+        } catch (err: any) {
+            console.error('Error updating trade:', err);
+            res.status(500).json({ success: false, message: 'Error updating trade', error: err.message });
+        }
+    }
 }
