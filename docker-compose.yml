@@ -50,43 +50,15 @@ services:
       context: ./api_trades
     env_file:
       - ./api_trades/.env
-    environment:
-      # Override DB connection to point to Docker's internal DB service instead of localhost
-      DB_HOST: db
-      DB_PORT: 5432
-      # Remove DATABASE_URL override to use the one from .env, but ensure .env has the right host/port
-      # or construct it here using var expansion if possible. Better yet, let the app 
-      # use DB_HOST, DB_USER, etc., or we override DATABASE_URL using variables 
-      # from the .env file.
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@db:5432/${DB_NAME}
     ports:
       - "3010:3000"
     restart: unless-stopped
-    depends_on: [ db ]
     networks: [ trading_net ]
     logging:
       options:
         max-size: "10m"
         max-file: "5"
 
-  db:
-    image: postgres:15-alpine
-    restart: unless-stopped
-    env_file:
-      - ./api_trades/.env
-    environment:
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME}
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks: [ trading_net ]
-
 networks:
   trading_net:
     driver: bridge
-
-volumes:
-  postgres_data:
