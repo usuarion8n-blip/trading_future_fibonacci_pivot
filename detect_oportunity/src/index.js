@@ -1200,15 +1200,10 @@ async function reconcileOpenTrades() {
 async function restoreOpenTrades() {
     let data = [];
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN`);
+        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
         if (res.ok) {
             const json = await res.json();
-            // Filtrar los correspondientes a este script (como lo hacía supabase)
-            data = (json.data || []).filter(r => 
-                r.symbol === SYMBOL_DB &&
-                r.strategy_name === STRATEGY_NAME &&
-                r.service_name === SERVICE_NAME
-            ).slice(0, MAX_OPEN_TRADES);
+            data = (json.data || []).slice(0, MAX_OPEN_TRADES);
         } else {
             console.error("❌ Error restaurando OPEN trades (status API != 200)");
         }

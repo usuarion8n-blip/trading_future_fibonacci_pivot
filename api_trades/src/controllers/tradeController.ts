@@ -9,6 +9,9 @@ export class TradeController {
             status: req.query.status as string,
             dateFilter: req.query.date as string,
             nivelFilter: req.query.level as string,
+            symbol: req.query.symbol as string,
+            strategy_name: req.query.strategy_name as string,
+            service_name: req.query.service_name as string,
             page: req.query.page ? parseInt(req.query.page as string, 10) : undefined,
             pageSize: req.query.pageSize ? parseInt(req.query.pageSize as string, 10) : undefined
         };

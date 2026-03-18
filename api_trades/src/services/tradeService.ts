@@ -5,6 +5,9 @@ export interface TradeFilter {
     status?: string;
     dateFilter?: string; // 'HOY', '1S', '1M', '1A'
     nivelFilter?: string; // 'VWAP', 'PIVOTS'
+    symbol?: string;
+    strategy_name?: string;
+    service_name?: string;
     page?: number;
     pageSize?: number;
 }
@@ -39,6 +42,21 @@ export class TradeService {
             } else if (filters.nivelFilter === 'PIVOTS') {
                 conditions.push(`level IN ('R1', 'R2', 'R3', 'S1', 'S2', 'S3')`);
             }
+        }
+
+        if (filters.symbol) {
+            conditions.push(`symbol = $${paramIndex++}`);
+            params.push(filters.symbol);
+        }
+
+        if (filters.strategy_name) {
+            conditions.push(`strategy_name = $${paramIndex++}`);
+            params.push(filters.strategy_name);
+        }
+
+        if (filters.service_name) {
+            conditions.push(`service_name = $${paramIndex++}`);
+            params.push(filters.service_name);
         }
 
         const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
