@@ -790,7 +790,7 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 return null;
             }
 
-            console.error("❌ No pude reservar OPEN en Supabase. No opero en Binance.", {
+            console.error("❌ No pude reservar OPEN en la API. No opero en Binance.", {
                 symbol: SYMBOL_DB,
                 strategy_name: STRATEGY_NAME,
                 service_name: SERVICE_NAME,
@@ -848,7 +848,7 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 newOrderRespType: "RESULT",
             });
         } catch (e) {
-            console.error("❌ Entry order failed after Supabase reservation:", e.message);
+            console.error("❌ Entry order failed after API reservation:", e.message);
 
             await closeReservedTradeAsFailed(reservedTrade.id, "ENTRY_ORDER_FAILED", {
                 entry_error: e.message,
@@ -933,7 +933,7 @@ async function openTradeReal({ side, bid, ask, vwap, distBps }) {
                 slOrder,
             });
         } catch (e) {
-            console.error("❌ No pude finalizar trade OPEN en Supabase después de Binance:", e.message);
+            console.error("❌ No pude finalizar trade OPEN en la API después de Binance:", e.message);
 
             await cancelAlgoSafe(tpOrder?.algoId ?? null);
             await cancelAlgoSafe(slOrder?.algoId ?? null);
@@ -1340,7 +1340,7 @@ async function reconcileOpenTrades() {
                     slAlgo,
                 });
             } catch (e) {
-                console.error("❌ Supabase close update failed:", e.message);
+                console.error("❌ API close update failed:", e.message);
                 continue;
             }
 
