@@ -302,7 +302,7 @@ function getVwapLockRemainingMs(now = Date.now()) {
 
 async function restoreVwapLevelLock() {
     try {
-        const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+        const resList = await fetchWithTimeout(`${API_TRADES_URL}/api/trades`);
         if (!resList.ok) return;
         const listJson = await resList.json();
 
@@ -336,7 +336,7 @@ async function restoreVwapLevelLock() {
 // ======================
 async function hasOpenTradeInDb() {
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
         if (!res.ok) throw new Error("API failed");
         const json = await res.json();
         return (json.count || 0) > 0;
@@ -358,7 +358,7 @@ function isUniqueOpenViolation(error) {
 }
 
 async function getCurrentMetaForOpenTrade(id) {
-    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
     if (res.ok) {
         const json = await res.json();
         if (json.data?.meta) return json.data.meta;
@@ -421,7 +421,7 @@ async function reserveOpenTradeInDb({
         },
     };
 
-    const res = await fetch(`${API_TRADES_URL}/api/trades`, {
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(row),
@@ -459,7 +459,7 @@ async function finalizeReservedTradeInDb({
         },
     };
 
-    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
@@ -493,7 +493,7 @@ async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
     };
 
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -574,7 +574,7 @@ async function closeLiveTradeInDb({
     };
 
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -1369,7 +1369,7 @@ async function reconcileOpenTrades() {
 async function restoreOpenTrades() {
     let data = [];
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
         if (res.ok) {
             const json = await res.json();
             data = (json.data || []).slice(0, MAX_OPEN_TRADES);

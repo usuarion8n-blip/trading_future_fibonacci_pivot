@@ -231,7 +231,7 @@ async function loadSymbolFilters() {
 // Pivots loader
 // ======================
 async function loadRecentPivots(days = 2) {
-    const res = await fetch(`${API_TRADES_URL}/api/pivots/recent?limit=${days}&symbol=${SYMBOL_DB}&interval=${INTERVAL}`);
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/pivots/recent?limit=${days}&symbol=${SYMBOL_DB}&interval=${INTERVAL}`);
     
     if (!res.ok) {
         throw new Error(`API pivots fetch error: ${res.status}`);
@@ -307,7 +307,7 @@ function levelKey(baseDay, level) {
 
 async function hasOpenTradeInDb() {
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
         if (!res.ok) throw new Error("API failed");
         const json = await res.json();
         return (json.count || 0) > 0;
@@ -377,7 +377,7 @@ async function reserveOpenTradeInDb({
         },
     };
 
-    const res = await fetch(`${API_TRADES_URL}/api/trades`, {
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(row),
@@ -398,7 +398,7 @@ async function finalizeReservedTradeInDb({
     slOrder,
 }) {
     // 1) Leer meta actual a través del nuevo endpoint por ID
-    const resTrade = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
+    const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
     let currentMeta = {};
     if (resTrade.ok) {
         const tradeJson = await resTrade.json();
@@ -422,7 +422,7 @@ async function finalizeReservedTradeInDb({
         },
     };
 
-    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(patch),
@@ -434,7 +434,7 @@ async function finalizeReservedTradeInDb({
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
-    const resTrade = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
+    const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
     let currentMeta = {};
     if (resTrade.ok) {
         const tradeJson = await resTrade.json();
@@ -456,7 +456,7 @@ async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
     };
 
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -1159,7 +1159,7 @@ async function reconcileOpenTrades() {
             };
 
             try {
-                const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+                const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(patch),
@@ -1200,7 +1200,7 @@ async function reconcileOpenTrades() {
 async function restoreOpenTrades() {
     let data = [];
     try {
-        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
         if (res.ok) {
             const json = await res.json();
             data = (json.data || []).slice(0, MAX_OPEN_TRADES);
