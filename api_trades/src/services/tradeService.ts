@@ -93,6 +93,12 @@ export class TradeService {
         return result.rows[0];
     }
 
+    static async getTradeById(id: string | number) {
+        const sql = `SELECT * FROM ${config.db.tradesTable} WHERE id = $1`;
+        const result = await query(sql, [id]);
+        return result.rows[0];
+    }
+
     static async updateTrade(id: string | number, updateData: any) {
         const columns = Object.keys(updateData);
         const values = Object.values(updateData);

@@ -397,13 +397,12 @@ async function finalizeReservedTradeInDb({
     tpOrder,
     slOrder,
 }) {
-    // 1) Obtener trades y filtrar por ID (ya que la API devuelve lista) para no perder el meta actual
-    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+    // 1) Leer meta actual a través del nuevo endpoint por ID
+    const resTrade = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
     let currentMeta = {};
-    if (resList.ok) {
-        const listJson = await resList.json();
-        const t = (listJson.data || []).find(x => String(x.id) === String(id));
-        if (t?.meta) currentMeta = t.meta;
+    if (resTrade.ok) {
+        const tradeJson = await resTrade.json();
+        if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
     }
 
     // 2) Merge del meta anterior + nuevos campos
@@ -435,12 +434,11 @@ async function finalizeReservedTradeInDb({
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
-    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+    const resTrade = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
     let currentMeta = {};
-    if (resList.ok) {
-        const listJson = await resList.json();
-        const t = (listJson.data || []).find(x => String(x.id) === String(id));
-        if (t?.meta) currentMeta = t.meta;
+    if (resTrade.ok) {
+        const tradeJson = await resTrade.json();
+        if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
     }
 
     // 2) Merge del meta anterior + estado de fallo

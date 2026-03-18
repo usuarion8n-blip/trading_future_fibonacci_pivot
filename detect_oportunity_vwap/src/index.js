@@ -358,11 +358,10 @@ function isUniqueOpenViolation(error) {
 }
 
 async function getCurrentMetaForOpenTrade(id) {
-    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
-    if (resList.ok) {
-        const listJson = await resList.json();
-        const t = (listJson.data || []).find(x => String(x.id) === String(id));
-        if (t?.meta) return t.meta;
+    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`);
+    if (res.ok) {
+        const json = await res.json();
+        if (json.data?.meta) return json.data.meta;
     }
     return {};
 }

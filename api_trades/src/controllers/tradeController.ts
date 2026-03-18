@@ -62,6 +62,20 @@ export class TradeController {
         }
     }
 
+    static async getTradeById(req: Request, res: Response) {
+        try {
+            const id = req.params.id as string;
+            const trade = await TradeService.getTradeById(id);
+            if (!trade) {
+                return res.status(404).json({ success: false, message: 'Trade not found' });
+            }
+            res.json({ success: true, data: trade });
+        } catch (err: any) {
+            console.error('Error fetching trade by ID:', err);
+            res.status(500).json({ success: false, message: 'Error fetching trade', error: err.message });
+        }
+    }
+
     static async updateTrade(req: Request, res: Response) {
         try {
             const id = req.params.id as string;
