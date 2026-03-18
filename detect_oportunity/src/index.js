@@ -1,5 +1,4 @@
 import WebSocket from "ws";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
 try { process.loadEnvFile(); } catch { }
@@ -134,11 +133,7 @@ const SYMBOL_DB = process.env.SYMBOL_DB || "BTCUSDT";
 const INTERVAL = process.env.INTERVAL || "1m";
 const WS_URL = `${WS_BASE}/${SYMBOL_WS}@bookTicker`;
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-const PIVOT_TABLE = process.env.PIVOT_TABLE || "fib_pivot_daily";
-const TRADES_TABLE = process.env.TRADES_TABLE || "sim_trades";
+const API_TRADES_URL = process.env.API_TRADES_URL || "http://localhost:3000";
 
 // ======================
 // Ownership / strategy segregation
@@ -163,14 +158,6 @@ const ARMED = String(process.env.ARMED ?? "0") === "1";
 if (!DRY_RUN && !ARMED) {
     throw new Error("Bloqueado: DRY_RUN=0 pero ARMED!=1");
 }
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("Faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-});
 
 // ======================
 // Exchange filters (tick/step)
@@ -244,16 +231,18 @@ async function loadSymbolFilters() {
 // Pivots loader
 // ======================
 async function loadRecentPivots(days = 2) {
-    const { data, error } = await supabase
-        .from(PIVOT_TABLE)
-        .select("base_day, pp, r1, r2, r3, s1, s2, s3, symbol, interval, run_ts")
-        .eq("symbol", SYMBOL_DB)
-        .eq("interval", INTERVAL)
-        .order("base_day", { ascending: false })
-        .limit(days);
-
-    if (error) throw error;
-    if (!data || data.length === 0) throw new Error("No hay pivots en Supabase (fib_pivot_daily).");
+    const res = await fetch(`${API_TRADES_URL}/api/pivots/recent?limit=${days}&symbol=${SYMBOL_DB}&interval=${INTERVAL}`);
+    
+    if (!res.ok) {
+        throw new Error(`API pivots fetch error: ${res.status}`);
+    }
+    
+    const json = await res.json();
+    const data = json.data;
+    
+    if (!data || data.length === 0) {
+        throw new Error("No hay pivots en API (api_trades).");
+    }
 
     return data.map(row => ({
         baseDay: row.base_day,
@@ -318,20 +307,12 @@ function levelKey(baseDay, level) {
 
 async function hasOpenTradeInDb() {
     try {
-        const { count, error } = await supabase
-            .from(TRADES_TABLE)
-            .select("*", { count: "exact", head: true })
-            .eq("symbol", SYMBOL_DB)
-            .eq("status", "OPEN");
-
-        if (error) {
-            console.error("❌ hasOpenTradeInDb Supabase error:", error.message);
-            return true; // fail-safe: asumir que sí hay trade para no duplicar aperturas
-        }
-
-        return (count || 0) > 0;
+        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
+        if (!res.ok) throw new Error("API failed");
+        const json = await res.json();
+        return (json.count || 0) > 0;
     } catch (e) {
-        console.error("❌ hasOpenTradeInDb fetch error:", e?.stack || e?.message || e);
+        console.error("❌ hasOpenTradeInDb fetch error:", e?.message || e);
         return true; // fail-safe
     }
 }
@@ -370,11 +351,11 @@ async function reserveOpenTradeInDb({
         level,
         side,
         entry_ts: entryTs,
-        entry_price: null,
+        entry_price: 0,
         entry_bid: bid,
         entry_ask: ask,
-        tp_price: null,
-        sl_price: null,
+        tp_price: 0,
+        sl_price: 0,
         status: "OPEN",
         meta: {
             strategy_name: STRATEGY_NAME,
@@ -396,14 +377,15 @@ async function reserveOpenTradeInDb({
         },
     };
 
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .insert(row)
-        .select()
-        .single();
+    const res = await fetch(`${API_TRADES_URL}/api/trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(row),
+    });
 
-    if (error) throw error;
-    return data;
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || "Failed reserving trade in API");
+    return json.data;
 }
 
 async function finalizeReservedTradeInDb({
@@ -415,18 +397,14 @@ async function finalizeReservedTradeInDb({
     tpOrder,
     slOrder,
 }) {
-    // 1) Leer meta actual para no perderlo
-    const { data: currentRow, error: readError } = await supabase
-        .from(TRADES_TABLE)
-        .select("meta")
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN")
-        .single();
-
-    if (readError) throw readError;
-
-    const currentMeta = currentRow?.meta || {};
+    // 1) Obtener trades y filtrar por ID (ya que la API devuelve lista) para no perder el meta actual
+    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+    let currentMeta = {};
+    if (resList.ok) {
+        const listJson = await resList.json();
+        const t = (listJson.data || []).find(x => String(x.id) === String(id));
+        if (t?.meta) currentMeta = t.meta;
+    }
 
     // 2) Merge del meta anterior + nuevos campos
     const patch = {
@@ -445,35 +423,25 @@ async function finalizeReservedTradeInDb({
         },
     };
 
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .update(patch)
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN")
-        .select()
-        .single();
+    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+    });
 
-    if (error) throw error;
-    return data;
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
+    return json.data;
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
-    // 1) Leer meta actual para no perderlo
-    const { data: currentRow, error: readError } = await supabase
-        .from(TRADES_TABLE)
-        .select("meta")
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN")
-        .single();
-
-    if (readError) {
-        console.error("❌ closeReservedTradeAsFailed read meta error:", readError.message);
-        return;
+    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+    let currentMeta = {};
+    if (resList.ok) {
+        const listJson = await resList.json();
+        const t = (listJson.data || []).find(x => String(x.id) === String(id));
+        if (t?.meta) currentMeta = t.meta;
     }
-
-    const currentMeta = currentRow?.meta || {};
 
     // 2) Merge del meta anterior + estado de fallo
     const patch = {
@@ -489,15 +457,17 @@ async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
         },
     };
 
-    const { error } = await supabase
-        .from(TRADES_TABLE)
-        .update(patch)
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN");
-
-    if (error) {
-        console.error("❌ closeReservedTradeAsFailed error:", error.message);
+    try {
+        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+        if (!res.ok) {
+            console.error("❌ closeReservedTradeAsFailed API error:", await res.text());
+        }
+    } catch (e) {
+        console.error("❌ closeReservedTradeAsFailed fetch error:", e.message);
     }
 }
 
@@ -1190,16 +1160,18 @@ async function reconcileOpenTrades() {
                 },
             };
 
-            const { error } = await supabase
-                .from(TRADES_TABLE)
-                .update(patch)
-                .eq("id", id)
-                .eq("symbol", SYMBOL_DB)
-                .eq("strategy_name", STRATEGY_NAME)
-                .eq("service_name", SERVICE_NAME);
-
-            if (error) {
-                console.error("❌ Supabase close update failed:", error.message);
+            try {
+                const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(patch),
+                });
+                if (!res.ok) {
+                    console.error("❌ API close update failed:", await res.text());
+                    continue;
+                }
+            } catch (err) {
+                console.error("❌ API close update failed:", err.message);
                 continue;
             }
 
@@ -1228,32 +1200,22 @@ async function reconcileOpenTrades() {
 }
 
 async function restoreOpenTrades() {
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .select(`
-            id,
-            symbol,
-            strategy_name,
-            service_name,
-            trade_group_id,
-            side,
-            level,
-            entry_price,
-            tp_price,
-            sl_price,
-            entry_ts,
-            meta,
-            pivot_base_day
-        `)
-        .eq("symbol", SYMBOL_DB)
-        .eq("strategy_name", STRATEGY_NAME)
-        .eq("service_name", SERVICE_NAME)
-        .eq("status", "OPEN")
-        .order("entry_ts", { ascending: false })
-        .limit(MAX_OPEN_TRADES);
-
-    if (error) {
-        console.error("❌ Error restaurando OPEN trades:", error.message);
+    let data = [];
+    try {
+        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN`);
+        if (res.ok) {
+            const json = await res.json();
+            // Filtrar los correspondientes a este script (como lo hacía supabase)
+            data = (json.data || []).filter(r => 
+                r.symbol === SYMBOL_DB &&
+                r.strategy_name === STRATEGY_NAME &&
+                r.service_name === SERVICE_NAME
+            ).slice(0, MAX_OPEN_TRADES);
+        } else {
+            console.error("❌ Error restaurando OPEN trades (status API != 200)");
+        }
+    } catch (e) {
+        console.error("❌ Error restaurando OPEN trades:", e.message);
         return;
     }
 

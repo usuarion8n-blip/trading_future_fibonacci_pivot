@@ -1,5 +1,4 @@
 import WebSocket from "ws";
-import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 
 try { process.loadEnvFile(); } catch { }
@@ -106,10 +105,7 @@ const SYMBOL_DB = process.env.SYMBOL_DB || "BTCUSDT";
 const INTERVAL = process.env.INTERVAL || "1m";
 
 const WS_URL = `${WS_COMBINED_BASE}${SYMBOL_WS}@bookTicker/${SYMBOL_WS}@kline_1m`;
-
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const TRADES_TABLE = process.env.TRADES_TABLE || "sim_trades";
+const API_TRADES_URL = process.env.API_TRADES_URL || "http://localhost:3000";
 
 // ======================
 // Ownership / strategy segregation
@@ -143,14 +139,6 @@ const MAX_OPEN_TRADES = Number(process.env.MAX_OPEN_TRADES ?? 1);
 // Logs / reconciliación
 const PRINT_EVERY_MS = Number(process.env.PRINT_EVERY_MS ?? 5000);
 const RECONCILE_EVERY_MS = Number(process.env.RECONCILE_EVERY_MS ?? 3000);
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-    throw new Error("Faltan SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY");
-}
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-});
 
 // ======================
 // Exchange filters (tick/step)
@@ -314,19 +302,14 @@ function getVwapLockRemainingMs(now = Date.now()) {
 
 async function restoreVwapLevelLock() {
     try {
-        const { data, error } = await supabase
-            .from(TRADES_TABLE)
-            .select("entry_ts, status, level, strategy_name, service_name")
-            .eq("symbol", SYMBOL_DB)
-            .eq("strategy_name", STRATEGY_NAME)
-            .eq("level", "VWAP")
-            .order("entry_ts", { ascending: false })
-            .limit(1);
+        const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+        if (!resList.ok) return;
+        const listJson = await resList.json();
 
-        if (error) {
-            console.error("❌ restoreVwapLevelLock error:", error.message);
-            return;
-        }
+        // Sort by entry_ts descending and filter manually just in case
+        const data = (listJson.data || [])
+            .filter(t => t.symbol === SYMBOL_DB && t.strategy_name === STRATEGY_NAME && t.level === "VWAP")
+            .sort((a, b) => new Date(b.entry_ts) - new Date(a.entry_ts));
 
         const row = data?.[0];
         if (!row?.entry_ts) return;
@@ -353,20 +336,12 @@ async function restoreVwapLevelLock() {
 // ======================
 async function hasOpenTradeInDb() {
     try {
-        const { count, error } = await supabase
-            .from(TRADES_TABLE)
-            .select("*", { count: "exact", head: true })
-            .eq("symbol", SYMBOL_DB)
-            .eq("status", "OPEN");
-
-        if (error) {
-            console.error("❌ hasOpenTradeInDb Supabase error:", error.message);
-            return true;
-        }
-
-        return (count || 0) > 0;
+        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
+        if (!res.ok) throw new Error("API failed");
+        const json = await res.json();
+        return (json.count || 0) > 0;
     } catch (e) {
-        console.error("❌ hasOpenTradeInDb fetch error:", e?.stack || e?.message || e);
+        console.error("❌ hasOpenTradeInDb fetch error:", e?.message || e);
         return true;
     }
 }
@@ -383,15 +358,13 @@ function isUniqueOpenViolation(error) {
 }
 
 async function getCurrentMetaForOpenTrade(id) {
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .select("meta")
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .single();
-
-    if (error) throw error;
-    return data?.meta || {};
+    const resList = await fetch(`${API_TRADES_URL}/api/trades`);
+    if (resList.ok) {
+        const listJson = await resList.json();
+        const t = (listJson.data || []).find(x => String(x.id) === String(id));
+        if (t?.meta) return t.meta;
+    }
+    return {};
 }
 
 async function reserveOpenTradeInDb({
@@ -415,11 +388,11 @@ async function reserveOpenTradeInDb({
         level: "VWAP",
         side,
         entry_ts: entryTs,
-        entry_price: null,
+        entry_price: 0,
         entry_bid: bid,
         entry_ask: ask,
-        tp_price: null,
-        sl_price: null,
+        tp_price: 0,
+        sl_price: 0,
         status: "OPEN",
         meta: {
             strategy_name: STRATEGY_NAME,
@@ -449,14 +422,15 @@ async function reserveOpenTradeInDb({
         },
     };
 
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .insert(row)
-        .select()
-        .single();
+    const res = await fetch(`${API_TRADES_URL}/api/trades`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(row),
+    });
 
-    if (error) throw error;
-    return data;
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || "Failed reserving trade in API");
+    return json.data;
 }
 
 async function finalizeReservedTradeInDb({
@@ -486,17 +460,15 @@ async function finalizeReservedTradeInDb({
         },
     };
 
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .update(patch)
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN")
-        .select()
-        .single();
+    const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+    });
 
-    if (error) throw error;
-    return data;
+    const json = await res.json();
+    if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
+    return json.data;
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
@@ -521,15 +493,17 @@ async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
         },
     };
 
-    const { error } = await supabase
-        .from(TRADES_TABLE)
-        .update(patch)
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("status", "OPEN");
-
-    if (error) {
-        console.error("❌ closeReservedTradeAsFailed error:", error.message);
+    try {
+        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+        if (!res.ok) {
+            console.error("❌ closeReservedTradeAsFailed API error:", await res.text());
+        }
+    } catch (e) {
+        console.error("❌ closeReservedTradeAsFailed error:", e.message);
     }
 }
 
@@ -600,15 +574,16 @@ async function closeLiveTradeInDb({
         },
     };
 
-    const { error } = await supabase
-        .from(TRADES_TABLE)
-        .update(patch)
-        .eq("id", id)
-        .eq("symbol", SYMBOL_DB)
-        .eq("strategy_name", STRATEGY_NAME)
-        .eq("service_name", SERVICE_NAME);
-
-    if (error) throw error;
+    try {
+        const res = await fetch(`${API_TRADES_URL}/api/trades/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+        if (!res.ok) throw new Error(await res.text());
+    } catch (error) {
+        throw error;
+    }
 }
 
 function canOpenNewTrade() {
@@ -1393,32 +1368,21 @@ async function reconcileOpenTrades() {
 }
 
 async function restoreOpenTrades() {
-    const { data, error } = await supabase
-        .from(TRADES_TABLE)
-        .select(`
-            id,
-            symbol,
-            strategy_name,
-            service_name,
-            trade_group_id,
-            side,
-            level,
-            entry_price,
-            tp_price,
-            sl_price,
-            entry_ts,
-            meta,
-            pivot_base_day
-        `)
-        .eq("symbol", SYMBOL_DB)
-        .eq("strategy_name", STRATEGY_NAME)
-        .eq("service_name", SERVICE_NAME)
-        .eq("status", "OPEN")
-        .order("entry_ts", { ascending: false })
-        .limit(MAX_OPEN_TRADES);
-
-    if (error) {
-        console.error("❌ Error restaurando OPEN trades:", error.message);
+    let data = [];
+    try {
+        const res = await fetch(`${API_TRADES_URL}/api/trades?status=OPEN`);
+        if (res.ok) {
+            const json = await res.json();
+            data = (json.data || []).filter(r => 
+                r.symbol === SYMBOL_DB &&
+                r.strategy_name === STRATEGY_NAME &&
+                r.service_name === SERVICE_NAME
+            ).slice(0, MAX_OPEN_TRADES);
+        } else {
+            console.error("❌ Error restaurando OPEN trades (status API != 200)");
+        }
+    } catch (e) {
+        console.error("❌ Error restaurando OPEN trades:", e.message);
         return;
     }
 
