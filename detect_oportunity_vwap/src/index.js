@@ -302,16 +302,11 @@ function getVwapLockRemainingMs(now = Date.now()) {
 
 async function restoreVwapLevelLock() {
     try {
-        const resList = await fetchWithTimeout(`${API_TRADES_URL}/api/trades`);
+        const resList = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&level=VWAP&page=0&pageSize=1`);
         if (!resList.ok) return;
         const listJson = await resList.json();
 
-        // Sort by entry_ts descending and filter manually just in case
-        const data = (listJson.data || [])
-            .filter(t => t.symbol === SYMBOL_DB && t.strategy_name === STRATEGY_NAME && t.level === "VWAP")
-            .sort((a, b) => new Date(b.entry_ts) - new Date(a.entry_ts));
-
-        const row = data?.[0];
+        const row = listJson.data && listJson.data.length > 0 ? listJson.data[0] : null;
         if (!row?.entry_ts) return;
 
         const entryMs = new Date(row.entry_ts).getTime();
@@ -441,33 +436,38 @@ async function finalizeReservedTradeInDb({
     tpOrder,
     slOrder,
 }) {
-    const currentMeta = await getCurrentMetaForOpenTrade(id);
+    try {
+        const currentMeta = await getCurrentMetaForOpenTrade(id);
 
-    const patch = {
-        entry_price: entryPrice,
-        tp_price: tpPrice,
-        sl_price: slPrice,
-        meta: {
-            ...currentMeta,
-            trade_state: "LIVE",
-            entry_order_id: entryOrder?.orderId ?? null,
-            tp_algo_id: tpOrder?.algoId ?? null,
-            sl_algo_id: slOrder?.algoId ?? null,
-            binance_entry_order: entryOrder,
-            binance_tp_order: tpOrder,
-            binance_sl_order: slOrder,
-        },
-    };
+        const patch = {
+            entry_price: entryPrice,
+            tp_price: tpPrice,
+            sl_price: slPrice,
+            meta: {
+                ...currentMeta,
+                trade_state: "LIVE",
+                entry_order_id: entryOrder?.orderId ?? null,
+                tp_algo_id: tpOrder?.algoId ?? null,
+                sl_algo_id: slOrder?.algoId ?? null,
+                binance_entry_order: entryOrder,
+                binance_tp_order: tpOrder,
+                binance_sl_order: slOrder,
+            },
+        };
 
-    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-    });
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
 
-    const json = await res.json();
-    if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
-    return json.data;
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
+        return json.data;
+    } catch (e) {
+        console.error("❌ finalizeReservedTradeInDb fetch error:", e?.message || e);
+        throw e;
+    }
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {

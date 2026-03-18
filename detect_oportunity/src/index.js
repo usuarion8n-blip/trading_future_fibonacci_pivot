@@ -232,14 +232,14 @@ async function loadSymbolFilters() {
 // ======================
 async function loadRecentPivots(days = 2) {
     const res = await fetchWithTimeout(`${API_TRADES_URL}/api/pivots/recent?limit=${days}&symbol=${SYMBOL_DB}&interval=${INTERVAL}`);
-    
+
     if (!res.ok) {
         throw new Error(`API pivots fetch error: ${res.status}`);
     }
-    
+
     const json = await res.json();
     const data = json.data;
-    
+
     if (!data || data.length === 0) {
         throw new Error("No hay pivots en API (api_trades).");
     }
@@ -397,65 +397,71 @@ async function finalizeReservedTradeInDb({
     tpOrder,
     slOrder,
 }) {
-    // 1) Leer meta actual a través del nuevo endpoint por ID
-    const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
-    let currentMeta = {};
-    if (resTrade.ok) {
-        const tradeJson = await resTrade.json();
-        if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
+    try {
+
+        // 1) Leer meta actual a través del nuevo endpoint por ID
+        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
+        let currentMeta = {};
+        if (resTrade.ok) {
+            const tradeJson = await resTrade.json();
+            if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
+        }
+
+        // 2) Merge del meta anterior + nuevos campos
+        const patch = {
+            entry_price: entryPrice,
+            tp_price: tpPrice,
+            sl_price: slPrice,
+            meta: {
+                ...currentMeta,
+                trade_state: "LIVE",
+                entry_order_id: entryOrder?.orderId ?? null,
+                tp_algo_id: tpOrder?.algoId ?? null,
+                sl_algo_id: slOrder?.algoId ?? null,
+                binance_entry_order: entryOrder,
+                binance_tp_order: tpOrder,
+                binance_sl_order: slOrder,
+            },
+        };
+
+        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(patch),
+        });
+
+        const json = await res.json();
+        if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
+        return json.data;
+    } catch (e) {
+        console.error("❌ finalizeReservedTradeInDb fetch error:", e?.message || e);
+        throw e;
     }
-
-    // 2) Merge del meta anterior + nuevos campos
-    const patch = {
-        entry_price: entryPrice,
-        tp_price: tpPrice,
-        sl_price: slPrice,
-        meta: {
-            ...currentMeta,
-            trade_state: "LIVE",
-            entry_order_id: entryOrder?.orderId ?? null,
-            tp_algo_id: tpOrder?.algoId ?? null,
-            sl_algo_id: slOrder?.algoId ?? null,
-            binance_entry_order: entryOrder,
-            binance_tp_order: tpOrder,
-            binance_sl_order: slOrder,
-        },
-    };
-
-    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(patch),
-    });
-
-    const json = await res.json();
-    if (!res.ok || !json.success) throw new Error(json.message || "Failed finalizing trade in API");
-    return json.data;
 }
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
-    const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
-    let currentMeta = {};
-    if (resTrade.ok) {
-        const tradeJson = await resTrade.json();
-        if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
-    }
-
-    // 2) Merge del meta anterior + estado de fallo
-    const patch = {
-        status: "CLOSED",
-        exit_ts: new Date().toISOString(),
-        exit_reason: failureReason,
-        pnl_usdt: 0,
-        meta: {
-            ...currentMeta,
-            trade_state: "FAILED_BEFORE_LIVE",
-            failure_reason: failureReason,
-            ...extraMeta,
-        },
-    };
-
     try {
+        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
+        let currentMeta = {};
+        if (resTrade.ok) {
+            const tradeJson = await resTrade.json();
+            if (tradeJson.data?.meta) currentMeta = tradeJson.data.meta;
+        }
+
+        // 2) Merge del meta anterior + estado de fallo
+        const patch = {
+            status: "CLOSED",
+            exit_ts: new Date().toISOString(),
+            exit_reason: failureReason,
+            pnl_usdt: 0,
+            meta: {
+                ...currentMeta,
+                trade_state: "FAILED_BEFORE_LIVE",
+                failure_reason: failureReason,
+                ...extraMeta,
+            },
+        };
+
         const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
