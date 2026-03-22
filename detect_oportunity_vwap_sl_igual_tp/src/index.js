@@ -116,7 +116,7 @@ const SERVICE_NAME = process.env.SERVICE_NAME || "vwap_service";
 // REAL / SIM
 const DRY_RUN = String(process.env.DRY_RUN ?? "1") === "1";
 const ARMED = String(process.env.ARMED ?? "0") === "1";
-const TRADE_API_PATH = DRY_RUN ? "/api/trades/sim" : "/api/trades";
+const TRADE_API_PATH = DRY_RUN ? "/api/trades/sim_igual_tp" : "/api/trades";
 
 if (!DRY_RUN && !ARMED) {
     throw new Error("Bloqueado: DRY_RUN=0 pero ARMED!=1");

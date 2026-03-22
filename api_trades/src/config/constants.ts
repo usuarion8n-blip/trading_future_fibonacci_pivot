@@ -13,6 +13,7 @@ export const config = {
         tradesTable: process.env.TABLE_TRADES || 'sim_trades',
         pivotsTable: process.env.TABLE_PIVOTS || 'fib_pivot_daily',
         simTradesTable: process.env.TABLE_SIM_TRADES || 'sim_trades_sl_bajo_tp_alto',
+        simTradesIgualTpTable: process.env.TABLE_SIM_TRADES_IGUAL_TP || 'sim_trades_sl_igual_tp',
     },
     server: {
         port: process.env.PORT || 3000,

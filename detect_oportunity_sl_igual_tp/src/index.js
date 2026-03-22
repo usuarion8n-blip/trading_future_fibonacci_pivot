@@ -134,7 +134,7 @@ const INTERVAL = process.env.INTERVAL || "1m";
 const WS_URL = `${WS_BASE}/${SYMBOL_WS}@bookTicker`;
 
 const API_TRADES_URL = process.env.API_TRADES_URL || "http://localhost:3000";
-const TRADE_API_PATH = DRY_RUN ? "/api/trades/sim" : "/api/trades";
+const TRADE_API_PATH = DRY_RUN ? "/api/trades/sim_igual_tp" : "/api/trades";
 
 // ======================
 // Ownership / strategy segregation

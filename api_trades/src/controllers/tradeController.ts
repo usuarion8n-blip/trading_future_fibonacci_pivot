@@ -20,8 +20,12 @@ export class TradeController {
 
     static async getTrades(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const filters = TradeController.parseFilters(req);
             const { trades, totalCount } = await TradeService.getTrades(filters, tableName);
             
@@ -38,8 +42,12 @@ export class TradeController {
 
     static async getStats(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const filters = TradeController.parseFilters(req);
             const stats = await TradeService.getStats(filters, tableName);
             res.json({ success: true, count: stats.length, data: stats });
@@ -51,8 +59,12 @@ export class TradeController {
 
     static async getStatuses(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const statuses = await TradeService.getDistinctStatuses(tableName);
             res.json({ success: true, data: statuses });
         } catch (err: any) {
@@ -63,8 +75,12 @@ export class TradeController {
 
     static async createTrade(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const tradeData = req.body;
             const newTrade = await TradeService.createTrade(tradeData, tableName);
             res.status(201).json({ success: true, data: newTrade });
@@ -76,8 +92,12 @@ export class TradeController {
 
     static async getTradeById(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const id = req.params.id as string;
             const trade = await TradeService.getTradeById(id, tableName);
             if (!trade) {
@@ -92,8 +112,12 @@ export class TradeController {
 
     static async updateTrade(req: Request, res: Response) {
         try {
-            const isSim = req.path.includes('/sim');
-            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            let tableName = config.db.tradesTable;
+            if (req.path.includes('/sim_igual_tp')) {
+                tableName = config.db.simTradesIgualTpTable;
+            } else if (req.path.includes('/sim')) {
+                tableName = config.db.simTradesTable;
+            }
             const id = req.params.id as string;
             const updateData = req.body;
             const updatedTrade = await TradeService.updateTrade(id, updateData, tableName);
