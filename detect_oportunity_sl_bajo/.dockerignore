@@ -1,0 +1,60 @@
+# ==========================
+# Dependencias de Node.js
+# ==========================
+node_modules/
+
+# ==========================
+# Variables de entorno
+# ==========================
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+
+# ==========================
+# Logs
+# ==========================
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ==========================
+# Caché y archivos temporales
+# ==========================
+.cache/
+.npm/
+*.tmp
+*.temp
+
+# ==========================
+# Sistema operativo
+# ==========================
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==========================
+# Editores e IDEs
+# ==========================
+.vscode/
+.idea/
+*.suo
+*.sw?
+
+# ==========================
+# Git
+# ==========================
+.git/
+.gitignore
+
+# ==========================
+# CI / misceláneos
+# ==========================
+coverage/
+.nyc_output/
+README.md
