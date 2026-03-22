@@ -63,10 +63,10 @@ export class TradeService {
         return { whereClause, params, paramIndex };
     }
 
-    static async getTrades(filters: TradeFilter = {}) {
+    static async getTrades(filters: TradeFilter = {}, tableName: string = config.db.tradesTable) {
         let { whereClause, params, paramIndex } = this.buildWhereClause(filters);
 
-        let sql = `SELECT * FROM ${config.db.tradesTable} ${whereClause} ORDER BY entry_ts DESC`;
+        let sql = `SELECT * FROM ${tableName} ${whereClause} ORDER BY entry_ts DESC`;
 
         if (filters.page !== undefined && filters.pageSize !== undefined) {
             const offset = filters.page * filters.pageSize;
@@ -75,7 +75,7 @@ export class TradeService {
         }
 
         // Get total count
-        const countSql = `SELECT COUNT(*) FROM ${config.db.tradesTable} ${whereClause}`;
+        const countSql = `SELECT COUNT(*) FROM ${tableName} ${whereClause}`;
         const [result, countResult] = await Promise.all([
             query(sql, params),
             query(countSql, params.slice(0, filters.page !== undefined ? params.length - 2 : params.length))
@@ -87,44 +87,44 @@ export class TradeService {
         };
     }
 
-    static async getStats(filters: TradeFilter = {}) {
+    static async getStats(filters: TradeFilter = {}, tableName: string = config.db.tradesTable) {
         const { whereClause, params } = this.buildWhereClause(filters);
-        const sql = `SELECT id, status, pnl_usdt, meta FROM ${config.db.tradesTable} ${whereClause} ORDER BY entry_ts ASC`;
+        const sql = `SELECT id, status, pnl_usdt, meta FROM ${tableName} ${whereClause} ORDER BY entry_ts ASC`;
         const result = await query(sql, params);
         return result.rows;
     }
 
-    static async getDistinctStatuses() {
-        const sql = `SELECT DISTINCT status FROM ${config.db.tradesTable} WHERE status IS NOT NULL`;
+    static async getDistinctStatuses(tableName: string = config.db.tradesTable) {
+        const sql = `SELECT DISTINCT status FROM ${tableName} WHERE status IS NOT NULL`;
         const result = await query(sql);
         return result.rows.map(r => r.status);
     }
 
-    static async createTrade(tradeData: any) {
+    static async createTrade(tradeData: any, tableName: string = config.db.tradesTable) {
         const columns = Object.keys(tradeData);
         const values = Object.values(tradeData);
 
         const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
-        const sql = `INSERT INTO ${config.db.tradesTable} (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`;
+        const sql = `INSERT INTO ${tableName} (${columns.join(', ')}) VALUES (${placeholders}) RETURNING *`;
 
         const result = await query(sql, values);
         return result.rows[0];
     }
 
-    static async getTradeById(id: string | number) {
-        const sql = `SELECT * FROM ${config.db.tradesTable} WHERE id = $1`;
+    static async getTradeById(id: string | number, tableName: string = config.db.tradesTable) {
+        const sql = `SELECT * FROM ${tableName} WHERE id = $1`;
         const result = await query(sql, [id]);
         return result.rows[0];
     }
 
-    static async updateTrade(id: string | number, updateData: any) {
+    static async updateTrade(id: string | number, updateData: any, tableName: string = config.db.tradesTable) {
         const columns = Object.keys(updateData);
         const values = Object.values(updateData);
 
         if (columns.length === 0) return null;
 
         const setClause = columns.map((col, i) => `${col} = $${i + 1}`).join(', ');
-        const sql = `UPDATE ${config.db.tradesTable} SET ${setClause} WHERE id = $${values.length + 1} RETURNING *`;
+        const sql = `UPDATE ${tableName} SET ${setClause} WHERE id = $${values.length + 1} RETURNING *`;
 
         const result = await query(sql, [...values, id]);
         return result.rows[0];

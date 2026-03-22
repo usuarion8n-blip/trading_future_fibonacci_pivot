@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import { TradeService, TradeFilter } from '../services/tradeService.js';
+import { config } from '../config/constants.js';
 
 export class TradeController {
     
@@ -19,8 +20,10 @@ export class TradeController {
 
     static async getTrades(req: Request, res: Response) {
         try {
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
             const filters = TradeController.parseFilters(req);
-            const { trades, totalCount } = await TradeService.getTrades(filters);
+            const { trades, totalCount } = await TradeService.getTrades(filters, tableName);
             
             res.json({
                 success: true,
@@ -35,8 +38,10 @@ export class TradeController {
 
     static async getStats(req: Request, res: Response) {
         try {
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
             const filters = TradeController.parseFilters(req);
-            const stats = await TradeService.getStats(filters);
+            const stats = await TradeService.getStats(filters, tableName);
             res.json({ success: true, count: stats.length, data: stats });
         } catch (err: any) {
             console.error('Error fetching stats:', err);
@@ -46,7 +51,9 @@ export class TradeController {
 
     static async getStatuses(req: Request, res: Response) {
         try {
-            const statuses = await TradeService.getDistinctStatuses();
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
+            const statuses = await TradeService.getDistinctStatuses(tableName);
             res.json({ success: true, data: statuses });
         } catch (err: any) {
             console.error('Error fetching statuses:', err);
@@ -56,8 +63,10 @@ export class TradeController {
 
     static async createTrade(req: Request, res: Response) {
         try {
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
             const tradeData = req.body;
-            const newTrade = await TradeService.createTrade(tradeData);
+            const newTrade = await TradeService.createTrade(tradeData, tableName);
             res.status(201).json({ success: true, data: newTrade });
         } catch (err: any) {
             console.error('Error creating trade:', err);
@@ -67,8 +76,10 @@ export class TradeController {
 
     static async getTradeById(req: Request, res: Response) {
         try {
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
             const id = req.params.id as string;
-            const trade = await TradeService.getTradeById(id);
+            const trade = await TradeService.getTradeById(id, tableName);
             if (!trade) {
                 return res.status(404).json({ success: false, message: 'Trade not found' });
             }
@@ -81,9 +92,11 @@ export class TradeController {
 
     static async updateTrade(req: Request, res: Response) {
         try {
+            const isSim = req.path.includes('/sim');
+            const tableName = isSim ? config.db.simTradesTable : config.db.tradesTable;
             const id = req.params.id as string;
             const updateData = req.body;
-            const updatedTrade = await TradeService.updateTrade(id, updateData);
+            const updatedTrade = await TradeService.updateTrade(id, updateData, tableName);
             
             if (!updatedTrade) {
                 return res.status(404).json({ success: false, message: 'Trade not found' });

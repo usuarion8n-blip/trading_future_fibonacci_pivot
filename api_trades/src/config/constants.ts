@@ -12,6 +12,7 @@ export const config = {
         database: process.env.DB_NAME || 'mi_basedatos',
         tradesTable: process.env.TABLE_TRADES || 'sim_trades',
         pivotsTable: process.env.TABLE_PIVOTS || 'fib_pivot_daily',
+        simTradesTable: process.env.TABLE_SIM_TRADES || 'sim_trades_sl_bajo_tp_alto',
     },
     server: {
         port: process.env.PORT || 3000,

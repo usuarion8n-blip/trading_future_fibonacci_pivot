@@ -134,6 +134,7 @@ const INTERVAL = process.env.INTERVAL || "1m";
 const WS_URL = `${WS_BASE}/${SYMBOL_WS}@bookTicker`;
 
 const API_TRADES_URL = process.env.API_TRADES_URL || "http://localhost:3000";
+const TRADE_API_PATH = DRY_RUN ? "/api/trades/sim" : "/api/trades";
 
 // ======================
 // Ownership / strategy segregation
@@ -307,7 +308,7 @@ function levelKey(baseDay, level) {
 
 async function hasOpenTradeInDb() {
     try {
-        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}?status=OPEN&symbol=${SYMBOL_DB}`);
         if (!res.ok) throw new Error("API failed");
         const json = await res.json();
         return (json.count || 0) > 0;
@@ -377,7 +378,7 @@ async function reserveOpenTradeInDb({
         },
     };
 
-    const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades`, {
+    const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(row),
@@ -400,7 +401,7 @@ async function finalizeReservedTradeInDb({
     try {
 
         // 1) Leer meta actual a través del nuevo endpoint por ID
-        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
+        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}/${id}`);
         let currentMeta = {};
         if (resTrade.ok) {
             const tradeJson = await resTrade.json();
@@ -424,7 +425,7 @@ async function finalizeReservedTradeInDb({
             },
         };
 
-        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
+        const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -441,7 +442,7 @@ async function finalizeReservedTradeInDb({
 
 async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
     try {
-        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`);
+        const resTrade = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}/${id}`);
         let currentMeta = {};
         if (resTrade.ok) {
             const tradeJson = await resTrade.json();
@@ -462,7 +463,7 @@ async function closeReservedTradeAsFailed(id, failureReason, extraMeta = {}) {
             },
         };
 
-        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
+        const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}/${id}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(patch),
@@ -1229,7 +1230,7 @@ async function reconcileOpenTrades() {
             };
 
             try {
-                const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades/${id}`, {
+                const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}/${id}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(patch),
@@ -1270,7 +1271,7 @@ async function reconcileOpenTrades() {
 async function restoreOpenTrades() {
     let data = [];
     try {
-        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
+        const res = await fetchWithTimeout(`${API_TRADES_URL}${TRADE_API_PATH}?status=OPEN&symbol=${SYMBOL_DB}&strategy_name=${STRATEGY_NAME}&service_name=${SERVICE_NAME}`);
         if (res.ok) {
             const json = await res.json();
             data = (json.data || []).slice(0, MAX_OPEN_TRADES);

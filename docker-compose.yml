@@ -43,6 +43,20 @@ services:
         max-size: "10m"
         max-file: "5"
 
+  detect_oportunity_sl_bajo:
+    image: aeor06/trading_future:detect_oportunity_sl_bajo
+    build:
+      context: ./detect_oportunity_sl_bajo
+    env_file:
+      - ./detect_oportunity_sl_bajo/.env
+    restart: unless-stopped
+    depends_on: [ api_trades ]
+    networks: [ trading_net ]
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   front_market:
     image: aeor06/trading_future:front_market
     build:
