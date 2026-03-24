@@ -128,7 +128,7 @@ const CONFIRM_TICKS = Number(process.env.CONFIRM_TICKS ?? 3);
 const COOLDOWN_MS = Number(process.env.COOLDOWN_MS ?? (2 * 60_000));
 
 // NUEVO: bloqueo temporal del nivel VWAP
-const VWAP_LEVEL_BLOCK_MS = Number(process.env.VWAP_LEVEL_BLOCK_MS ?? (30 * 60_000));
+const VWAP_LEVEL_BLOCK_MS = Number(process.env.VWAP_LEVEL_BLOCK_MS ?? (15 * 60_000));
 
 // Gestión de trade
 const TP_PCT = Number(process.env.TP_PCT ?? 0.0015);
