@@ -26,13 +26,21 @@ export class TradeService {
 
         if (filters.dateFilter && filters.dateFilter !== 'ALL') {
             const now = new Date();
-            if (filters.dateFilter === 'HOY') now.setHours(0, 0, 0, 0);
-            else if (filters.dateFilter === '1S') now.setDate(now.getDate() - 7);
-            else if (filters.dateFilter === '1M') now.setMonth(now.getMonth() - 1);
-            else if (filters.dateFilter === '1A') now.setFullYear(now.getFullYear() - 1);
+            if (filters.dateFilter === 'HOY') {
+                const bogotaStr = new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+                const [month, day, year] = bogotaStr.split('/');
+                const bogotaMidnightUTC = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), 5, 0, 0)); // UTC-5 offset
 
-            conditions.push(`entry_ts >= $${paramIndex++}`);
-            params.push(now.toISOString());
+                conditions.push(`entry_ts >= $${paramIndex++}`);
+                params.push(bogotaMidnightUTC.toISOString());
+            } else {
+                if (filters.dateFilter === '1S') now.setDate(now.getDate() - 7);
+                else if (filters.dateFilter === '1M') now.setMonth(now.getMonth() - 1);
+                else if (filters.dateFilter === '1A') now.setFullYear(now.getFullYear() - 1);
+
+                conditions.push(`entry_ts >= $${paramIndex++}`);
+                params.push(now.toISOString());
+            }
         }
 
         if (filters.nivelFilter && filters.nivelFilter !== 'ALL') {
