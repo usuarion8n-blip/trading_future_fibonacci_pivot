@@ -159,6 +159,8 @@ if (!DRY_RUN && !ARMED) {
     throw new Error("Bloqueado: DRY_RUN=0 pero ARMED!=1");
 }
 
+const REARM_DISTANCE_BPS = Number(process.env.REARM_DISTANCE_BPS ?? 24); // 0.24%
+
 // ======================
 // Exchange filters (tick/step)
 // ======================
@@ -281,80 +283,54 @@ function bpsDistance(price, levelPrice) {
 // Trade tracker
 // ======================
 const openTrades = new Map();
-let lockedLevelKey = null;
 let openingTrade = false;
-let temporaryLockTimeout = null;
 
 const CROSS_NO_REBOUND_BLOCK_MS = Number(
     process.env.CROSS_NO_REBOUND_BLOCK_MS ?? (15 * 60_000)
 );
 
-function clearTemporaryLockTimer() {
-    if (temporaryLockTimeout) {
-        clearTimeout(temporaryLockTimeout);
-        temporaryLockTimeout = null;
-    }
+// ÚNICO lock real del sistema
+// type:
+// - TRADE_SUCCESS: bloquea ese nivel hasta que otro evento lo reemplace
+// - CROSS_NO_REBOUND: bloquea ese nivel hasta cumplir tiempo + distancia
+let lockedLevel = null;
+
+function levelKey(baseDay, level) {
+    return `${baseDay}:${level}`;
 }
 
-function lockLevelTemporarily(baseDay, level, reason = "CROSS_NO_REBOUND") {
-    const nextKey = levelKey(baseDay, level);
-    const previous = lockedLevelKey;
-
-    // este nuevo lock reemplaza cualquier lock anterior
-    lockedLevelKey = nextKey;
-
-    // si había timer anterior, se cancela
-    clearTemporaryLockTimer();
-
-    const blockedUntil = new Date(Date.now() + CROSS_NO_REBOUND_BLOCK_MS).toISOString();
-
-    console.log("🚫 Temporary locked level changed:", {
-        previous,
-        current: lockedLevelKey,
-        reason,
-        blockedUntil,
-        strategy_name: STRATEGY_NAME,
-        service_name: SERVICE_NAME,
-    });
-
-    temporaryLockTimeout = setTimeout(() => {
-        if (lockedLevelKey === nextKey) {
-            lockedLevelKey = null;
-            console.log("🔓 Temporary locked level expired:", {
-                released: nextKey,
-                reason,
-                strategy_name: STRATEGY_NAME,
-                service_name: SERVICE_NAME,
-            });
-        }
-        temporaryLockTimeout = null;
-    }, CROSS_NO_REBOUND_BLOCK_MS);
+function getLockedLevelKey() {
+    return lockedLevel?.key ?? null;
 }
 
-// ======================
-// Locked level, actualizar nivel bloqueado
-// ======================
+function isLockedLevel(baseDay, level) {
+    return getLockedLevelKey() === levelKey(baseDay, level);
+}
 
 function updateLockedLevel(baseDay, level) {
     const nextKey = levelKey(baseDay, level);
-    const prevKey = lockedLevelKey;
+    const prevKey = getLockedLevelKey();
 
-    // si existía un lock temporal, lo reemplazamos por uno permanente
-    clearTemporaryLockTimer();
-
-    lockedLevelKey = nextKey;
+    lockedLevel = {
+        key: nextKey,
+        baseDay,
+        level,
+        type: "TRADE_SUCCESS",
+        blockedUntilMs: null,
+        rearmedFarEnough: false,
+    };
 
     if (prevKey !== nextKey) {
         console.log("🔒 Locked level changed:", {
             previous: prevKey,
-            current: lockedLevelKey,
+            current: nextKey,
             lock_type: "TRADE_SUCCESS",
             strategy_name: STRATEGY_NAME,
             service_name: SERVICE_NAME,
         });
     } else {
         console.log("🔒 Locked level remains:", {
-            current: lockedLevelKey,
+            current: nextKey,
             lock_type: "TRADE_SUCCESS",
             strategy_name: STRATEGY_NAME,
             service_name: SERVICE_NAME,
@@ -362,8 +338,82 @@ function updateLockedLevel(baseDay, level) {
     }
 }
 
-function levelKey(baseDay, level) {
-    return `${baseDay}:${level}`;
+function lockLevelTemporarily(baseDay, level, reason = "CROSS_NO_REBOUND") {
+    const nextKey = levelKey(baseDay, level);
+    const previous = getLockedLevelKey();
+    const blockedUntilMs = Date.now() + CROSS_NO_REBOUND_BLOCK_MS;
+
+    lockedLevel = {
+        key: nextKey,
+        baseDay,
+        level,
+        type: "CROSS_NO_REBOUND",
+        blockedUntilMs,
+        rearmedFarEnough: false,
+    };
+
+    console.log("🚫 Temporary locked level changed:", {
+        previous,
+        current: nextKey,
+        reason,
+        blockedUntil: new Date(blockedUntilMs).toISOString(),
+        strategy_name: STRATEGY_NAME,
+        service_name: SERVICE_NAME,
+    });
+
+    return blockedUntilMs;
+}
+
+function updateLockedLevelRearm(baseDay, level, distBpsAbs) {
+    if (!lockedLevel) return;
+    if (lockedLevel.type !== "CROSS_NO_REBOUND") return;
+    if (lockedLevel.baseDay !== baseDay || lockedLevel.level !== level) return;
+
+    if (!lockedLevel.rearmedFarEnough && distBpsAbs >= REARM_DISTANCE_BPS) {
+        lockedLevel.rearmedFarEnough = true;
+
+        console.log("🟢 Nivel listo por distancia de rearme:", {
+            key: lockedLevel.key,
+            distBpsAbs: Number(distBpsAbs.toFixed(2)),
+            rearmDistanceBps: REARM_DISTANCE_BPS,
+            strategy_name: STRATEGY_NAME,
+            service_name: SERVICE_NAME,
+        });
+    }
+}
+
+function canTradeLockedLevelNow(baseDay, level) {
+    if (!lockedLevel) return true;
+
+    const key = levelKey(baseDay, level);
+    if (lockedLevel.key !== key) return true;
+
+    // si el lock actual es por trade exitoso, ese nivel sigue bloqueado
+    if (lockedLevel.type === "TRADE_SUCCESS") {
+        return false;
+    }
+
+    // si el lock actual es por cruce, debe cumplir tiempo + distancia
+    if (lockedLevel.type === "CROSS_NO_REBOUND") {
+        const now = Date.now();
+        const timeReady = now >= lockedLevel.blockedUntilMs;
+        const distanceReady = lockedLevel.rearmedFarEnough;
+
+        if (timeReady && distanceReady) {
+            console.log("🔓 Nivel rearmado tras cruce:", {
+                key: lockedLevel.key,
+                strategy_name: STRATEGY_NAME,
+                service_name: SERVICE_NAME,
+            });
+
+            lockedLevel = null;
+            return true;
+        }
+
+        return false;
+    }
+
+    return true;
 }
 
 function isUniqueOpenViolation(error) {
@@ -828,7 +878,7 @@ async function openTradeReal({ side, level, levelPrice, distBps, bid, ask, pivot
             qty: qtyAdj,
             tpAlgoId: tpOrder?.algoId,
             slAlgoId: slOrder?.algoId,
-            lockedLevelKey,
+            lockedLevelKey: getLockedLevelKey(),
         });
 
         return data.id;
@@ -1243,7 +1293,7 @@ async function reconcileOpenTrades() {
                 fees_usdt: Number(feesUsdt.toFixed(6)),
                 net_pnl_usdt: Number(netPnl.toFixed(6)),
                 realized_pnl_binance_usdt: Number(realizedPnlBinance.toFixed(6)),
-                lockedLevelKey,
+                lockedLevelKey: getLockedLevelKey(),
             });
 
         } catch (e) {
@@ -1305,11 +1355,18 @@ async function restoreOpenTrades() {
         count: openTrades.size,
     });
 
-    if (openTrades.size > 0 && !lockedLevelKey) {
+    if (openTrades.size > 0 && !lockedLevel) {
         const any = openTrades.values().next().value;
         if (any?.pivot_base_day_used && any?.level) {
-            lockedLevelKey = levelKey(any.pivot_base_day_used, any.level);
-            console.log("🔒 Locked level restored:", lockedLevelKey);
+            lockedLevel = {
+                key: levelKey(any.pivot_base_day_used, any.level),
+                baseDay: any.pivot_base_day_used,
+                level: any.level,
+                type: "TRADE_SUCCESS",
+                blockedUntilMs: null,
+                rearmedFarEnough: false,
+            };
+            console.log("🔒 Locked level restored:", lockedLevel.key);
         }
     }
 }
@@ -1336,12 +1393,23 @@ async function processQuote({ bid, ask }) {
 
     for (const item of levelsToWatch) {
         const lvlKey = levelKey(item.baseDay, item.level);
-        if (lockedLevelKey === lvlKey) continue;
-
         const levelPrice = item.price;
         const distBps = bpsDistance(midPrice, levelPrice);
         const absBps = Math.abs(distBps);
         const k = detKey(item.baseDay, item.level);
+
+        // Solo el nivel actualmente bloqueado por cruce puede actualizar su rearme
+        updateLockedLevelRearm(item.baseDay, item.level, absBps);
+
+        // Si este nivel es el bloqueado actual, decidir si sigue bloqueado o ya se liberó
+        if (!canTradeLockedLevelNow(item.baseDay, item.level)) {
+            continue;
+        }
+
+        // Si sigue siendo el nivel bloqueado por éxito, no se opera
+        if (isLockedLevel(item.baseDay, item.level)) {
+            continue;
+        }
 
         if (!detectorTouched.get(k) && absBps <= TOUCH_BUFFER_BPS) {
             detectorTouched.set(k, true);
@@ -1404,7 +1472,11 @@ async function processQuote({ bid, ask }) {
                 detectorConfirm.set(k, 0);
                 detectorTouchSide.delete(k);
 
-                lockLevelTemporarily(item.baseDay, item.level, "CROSS_NO_REBOUND");
+                const blockedUntilMs = lockLevelTemporarily(
+                    item.baseDay,
+                    item.level,
+                    "CROSS_NO_REBOUND"
+                );
 
                 console.log("🚫 Nivel bloqueado por cruce sin rebote:", {
                     level: item.level,
@@ -1413,7 +1485,9 @@ async function processQuote({ bid, ask }) {
                     touchSide,
                     distBps: distBps.toFixed(2),
                     lockMs: CROSS_NO_REBOUND_BLOCK_MS,
-                    lockedLevelKey,
+                    blockedUntil: new Date(blockedUntilMs).toISOString(),
+                    rearmDistanceBps: REARM_DISTANCE_BPS,
+                    lockedLevelKey: getLockedLevelKey(),
                     strategy_name: STRATEGY_NAME,
                     service_name: SERVICE_NAME,
                 });
@@ -1450,7 +1524,7 @@ function printLevels({ bid, ask }) {
         ` MID=${mid}` +
         ` openTrades=${openTrades.size}` +
         ` openingTrade=${openingTrade ? 1 : 0}` +
-        ` locked=${lockedLevelKey || "-"}`
+        ` locked=${getLockedLevelKey() || "-"}`
     );
 
     for (const p of pivotsList) {
