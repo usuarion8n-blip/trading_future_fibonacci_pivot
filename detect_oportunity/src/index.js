@@ -366,18 +366,6 @@ function levelKey(baseDay, level) {
     return `${baseDay}:${level}`;
 }
 
-async function hasOpenTradeInDb() {
-    try {
-        const res = await fetchWithTimeout(`${API_TRADES_URL}/api/trades?status=OPEN&symbol=${SYMBOL_DB}`);
-        if (!res.ok) throw new Error("API failed");
-        const json = await res.json();
-        return (json.count || 0) > 0;
-    } catch (e) {
-        console.error("❌ hasOpenTradeInDb fetch error:", e?.message || e);
-        return true; // fail-safe
-    }
-}
-
 function isUniqueOpenViolation(error) {
     const msg = String(error?.message || "").toLowerCase();
     return (
